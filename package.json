@@ -1,13 +1,19 @@
 {
   "name": "sqlite3-wasm",
-  "private": true,
-  "version": "0.0.0",
+  "version": "0.0.1",
   "type": "module",
+  "private": true,
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test:browser": "vitest"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.es.js",
+      "types": "./dist/index.d.ts"
+    }
   },
   "devDependencies": {
     "@types/node": "^24.10.0",
@@ -15,6 +21,7 @@
     "tsx": "^4.20.6",
     "typescript": "~5.9.3",
     "vite": "^7.1.7",
+    "vite-plugin-dts": "^4.5.4",
     "vitest": "^4.0.7",
     "zx": "^8.8.5"
   },

@@ -7,9 +7,7 @@ import (
 	"database/sql/driver"
 )
 
-type Driver struct {
-	name string
-}
+type Driver struct{}
 
 var _ driver.Driver = Driver{}
 
@@ -23,5 +21,5 @@ func (d Driver) Open(name string) (driver.Conn, error) {
 }
 
 func (d Driver) OpenConnector(name string) (driver.Connector, error) {
-	return Connector{d}, nil
+	return Connector{name}, nil
 }

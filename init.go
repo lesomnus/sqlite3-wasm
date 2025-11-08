@@ -9,5 +9,5 @@ import (
 )
 
 func init() {
-	sql.Register("sqlite-wasm", driver.Driver{})
+	sql.Register("sqlite3-wasm", driver.Driver{})
 }

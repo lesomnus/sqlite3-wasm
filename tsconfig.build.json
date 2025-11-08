@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "exclude": [
+    "examples",
+    "src/example_runner.ts",
+    "src/*.test.ts",
+  ]
+}

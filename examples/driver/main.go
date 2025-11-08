@@ -10,7 +10,7 @@ import (
 )
 
 func main() {
-	db, err := sql.Open("sqlite-wasm", "file::memory:")
+	db, err := sql.Open("sqlite3-wasm", "file::memory:")
 	assert.NoErr(err)
 
 	defer db.Close()

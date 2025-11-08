@@ -6,6 +6,8 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"io"
+	"math"
+	"time"
 
 	"github.com/lesomnus/sqlite3-wasm/binding"
 )
@@ -99,17 +101,45 @@ func convertToDriverValue(v any) driver.Value {
 		return int64(t)
 	case uint64:
 		return int64(t)
+
+		// All numbers from JS are float64, but some numbers are integers in the DB.
+		// Meanwhile, booleans are stored as integers in the DB, and sql.Row.Scanner
+		// does not scan floats as booleans, only integers.
+		// Thankfully, sql.Row.Scanner converts integers to floats if needed.
+		// Therefore, I decided to convert the result to an integer whenever possible.
 	case float32:
+		if isInteger(float64(t)) {
+			return int64(t)
+		}
 		return float64(t)
 	case float64:
+		if isInteger(t) {
+			return int64(t)
+		}
 		return t
 	case bool:
 		return t
 	case string:
+		// Try to parse as time.
+		// TODO: I think this implementation is not safe.
+		layouts := []string{
+			// time.RFC3339Nano,
+			// time.RFC3339,
+			"2006-01-02 15:04:05.999999999 -0700 MST",
+		}
+		for _, layout := range layouts {
+			if parsed, err := time.Parse(layout, t); err == nil {
+				return parsed
+			}
+		}
 		return t
 	case []byte:
 		return t
 	default:
 		return fmt.Sprintf("%v", t)
 	}
+}
+
+func isInteger(f float64) bool {
+	return f == math.Trunc(f)
 }

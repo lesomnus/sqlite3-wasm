@@ -10,13 +10,13 @@ import (
 )
 
 type Connector struct {
-	d Driver
+	name string
 }
 
 var _ driver.Connector = Connector{}
 
 func (c Connector) Driver() driver.Driver {
-	return c.d
+	return Driver{}
 }
 
 func (c Connector) Connect(ctx context.Context) (driver.Conn, error) {
@@ -25,9 +25,13 @@ func (c Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		return nil, err
 	}
 
-	_, err = p.Open(c.d.name)
+	_, err = p.Open(c.name)
 	if err != nil {
 		return nil, err
 	}
+
+	for range p.Exec(ctx, `PRAGMA foreign_keys = ON;`) {
+	}
+
 	return Conn{p}, nil
 }
