@@ -1,5 +1,5 @@
 {
-  "name": "sqlite3-wasm-bridge",
+  "name": "sqlite3-wasm",
   "private": true,
   "version": "0.0.0",
   "type": "module",

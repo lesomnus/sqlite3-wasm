@@ -4,7 +4,6 @@ package main
 
 import (
 	"database/sql"
-	"fmt"
 
 	_ "github.com/lesomnus/sqlite3-wasm"
 	"github.com/lesomnus/sqlite3-wasm/internal/assert"
@@ -19,23 +18,47 @@ func main() {
 	err = db.Ping()
 	assert.NoErr(err)
 
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT)`)
+	_, err = db.Exec(`
+CREATE TABLE users (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	name TEXT NOT NULL,
+	age INTEGER
+);`,
+	)
 	assert.NoErr(err)
 
-	_, err = db.Exec(`INSERT INTO users (name) VALUES (?)`, "Alice")
+	_, err = db.Exec(`
+INSERT INTO users (name, age) VALUES (?, 30), ('Bob', ?);`,
+		"Alice", 25)
 	assert.NoErr(err)
 
-	rows, err := db.Query(`SELECT id, name FROM users`)
+	rows, err := db.Query(`SELECT * FROM users`)
 	assert.NoErr(err)
 	defer rows.Close()
 
-	for rows.Next() {
-		var id int
-		var name string
-		err := rows.Scan(&id, &name)
-		assert.NoErr(err)
-		fmt.Printf("id=%d name=%s\n", id, name)
-	}
+	var (
+		id   int
+		name string
+		age  int
+	)
+
+	ok := rows.Next()
+	assert.X(ok)
+
+	err = rows.Scan(&id, &name, &age)
+	assert.NoErr(err)
+	assert.X(id == 1)
+	assert.X(name == "Alice")
+	assert.X(age == 30)
+
+	ok = rows.Next()
+	assert.X(ok)
+
+	err = rows.Scan(&id, &name, &age)
+	assert.NoErr(err)
+	assert.X(id == 2)
+	assert.X(name == "Bob")
+	assert.X(age == 25)
 
 	err = rows.Err()
 	assert.NoErr(err)

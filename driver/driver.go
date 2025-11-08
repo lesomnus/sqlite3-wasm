@@ -11,6 +11,8 @@ type Driver struct {
 	name string
 }
 
+var _ driver.Driver = Driver{}
+
 func (d Driver) Open(name string) (driver.Conn, error) {
 	c, err := d.OpenConnector(name)
 	if err != nil {
@@ -21,5 +23,5 @@ func (d Driver) Open(name string) (driver.Conn, error) {
 }
 
 func (d Driver) OpenConnector(name string) (driver.Connector, error) {
-	return Connector{Driver{name}}, nil
+	return Connector{d}, nil
 }

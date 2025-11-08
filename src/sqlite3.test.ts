@@ -9,14 +9,14 @@ describe('sqlite3', ()=>{
 
 		await exec(driver, `SELECT 1 + 1 AS result;`)
 
-// 		await exec(driver, `CREATE TABLE users (
-//   id INTEGER PRIMARY KEY AUTOINCREMENT,
-//   name TEXT NOT NULL,
-//   age INTEGER
-// );
-// 		`)
-// 		await exec(driver, `INSERT INTO users (name, age) VALUES ('Alice', 30), ('Bob', 25);`)
-// 		await exec(driver, `SELECT * FROM users;`)
+		await exec(driver, `CREATE TABLE users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  age INTEGER
+);
+		`)
+		await exec(driver, `INSERT INTO users (name, age) VALUES ('Alice', 30), ('Bob', 25);`)
+		await exec(driver, `SELECT * FROM users;`)
 	})
 })
 
