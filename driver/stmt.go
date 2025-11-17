@@ -38,28 +38,7 @@ func (s Stmt) Exec(args []driver.Value) (driver.Result, error) {
 }
 
 func (s Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
-	// Perform simple client-side parameter substitution and send SQL to worker.
-	final, err := substituteParams(s.q, args)
-	if err != nil {
-		return nil, err
-	}
-	ch := s.c.p.Exec(ctx, final)
-
-	// Consume results until the terminal RowResult (RowNumber == 0) or an error.
-	for rr := range ch {
-		if rr.Error != nil {
-			return nil, rr.Error
-		}
-		if rr.RowNumber == 0 {
-			break
-		}
-		// ignore row data for Exec
-	}
-
-	// We don't have reliable last-insert-id or rows-affected info from the
-	// worker here, so return zeros. This can be improved later when the
-	// worker API exposes that information.
-	return Result{0, 0}, nil
+	return s.c.ExecContext(ctx, s.q, args)
 }
 
 func (s Stmt) Query(args []driver.Value) (driver.Rows, error) {

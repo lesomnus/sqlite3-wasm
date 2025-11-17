@@ -5,6 +5,7 @@ package driver
 import (
 	"context"
 	"database/sql/driver"
+	"strings"
 
 	"github.com/lesomnus/sqlite3-wasm/binding"
 )
@@ -63,6 +64,24 @@ func (c Conn) ExecContext(ctx context.Context, query string, args []driver.Named
 	}
 	ch := c.p.Exec(ctx, final)
 
+	var changes chan float64
+	if strings.HasPrefix(final, "UPDATE") {
+		// Workaround for `sqlite3_changes`.
+		changes = make(chan float64, 1)
+		go func() {
+			ctx := context.WithoutCancel(ctx)
+			c := c.p.Exec(ctx, "SELECT changes()")
+			for v := range c {
+				if v.RowNumber == 0 {
+					break
+				}
+
+				n := v.Row[0].(float64)
+				changes <- n
+			}
+		}()
+	}
+
 	for rr := range ch {
 		if rr.Error != nil {
 			return Result{0, 0}, rr.Error
@@ -73,5 +92,9 @@ func (c Conn) ExecContext(ctx context.Context, query string, args []driver.Named
 		// ignore row data for Exec
 	}
 
-	return Result{0, 0}, nil
+	n := 0.0
+	if changes != nil {
+		n = <-changes
+	}
+	return Result{int64(n), 0}, nil
 }
