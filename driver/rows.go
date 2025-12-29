@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/lesomnus/sqlite3-wasm/binding"
@@ -70,14 +71,36 @@ func (r *Rows) Next(dest []driver.Value) error {
 	}
 
 	for i := range r.cur {
-		dest[i] = convertToDriverValue(r.cur[i])
+		dest[i] = convertToDriverValue(r.cols[i], r.cur[i])
 	}
 	// clear current row so next call reads the following one
 	r.cur = nil
 	return nil
 }
 
-func convertToDriverValue(v any) driver.Value {
+func convertToDriverValue(col string, v any) driver.Value {
+	if strings.HasPrefix(col, "date_") || strings.HasSuffix(col, "_at") {
+		if t, ok := v.(string); ok {
+			// if idx := strings.Index(t, " m="); idx != -1 {
+			// 	t = t[:idx]
+			// }
+
+			// Try to parse as time.
+			// TODO: I think this implementation is not safe.
+			layouts := []string{
+				// time.RFC3339Nano,
+				// time.RFC3339,
+				"2006-01-02 15:04:05.999999999 -0700 MST",
+			}
+			for _, layout := range layouts {
+				if parsed, err := time.Parse(layout, t); err == nil {
+					return parsed
+				}
+			}
+		}
+		return nil
+	}
+
 	switch t := v.(type) {
 	case nil:
 		return nil
@@ -120,18 +143,6 @@ func convertToDriverValue(v any) driver.Value {
 	case bool:
 		return t
 	case string:
-		// Try to parse as time.
-		// TODO: I think this implementation is not safe.
-		layouts := []string{
-			// time.RFC3339Nano,
-			// time.RFC3339,
-			"2006-01-02 15:04:05.999999999 -0700 MST",
-		}
-		for _, layout := range layouts {
-			if parsed, err := time.Parse(layout, t); err == nil {
-				return parsed
-			}
-		}
 		return t
 	case []byte:
 		return t
