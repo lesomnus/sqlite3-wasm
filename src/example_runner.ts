@@ -1,8 +1,14 @@
 import './index'
 import "./wasm_exec";
 
+// Go writes panics and stack traces to stderr, which lands on console.error.
+// Forwarding only console.log meant a failing example surfaced as a bare
+// "exit code 2" with the reason nowhere to be seen.
 console.log = (message: string) => {
-	self.postMessage({type: 'log', message})
+	self.postMessage({ type: 'log', message })
+}
+console.error = (message: string) => {
+	self.postMessage({ type: 'log', message: '[stderr] ' + message })
 }
 
 async function run(p: string){

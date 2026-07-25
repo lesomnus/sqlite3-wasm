@@ -374,17 +374,21 @@ full duration. Measured: with connection A in `BEGIN IMMEDIATE`, connection B's
 `INSERT` blocks the worker for 1001 ms with `busy_timeout=1000` and then returns
 `SQLITE_BUSY` anyway.
 
-OPFS is worse still: `getSyncHandle` creates one exclusive
-`FileSystemSyncAccessHandle` per opened file, and a second one retries six times
-with escalating backoff (≈4.5 s of `Atomics.wait`) before throwing.
+A caveat that was *expected* here did not survive measurement. The concern was
+that `getSyncHandle` creates one exclusive `FileSystemSyncAccessHandle` per file,
+so a second connection would retry six times with escalating backoff — roughly
+4.5 s of `Atomics.wait` — before throwing. Measured in Chromium 141, it does not:
+a second handle on the same OPFS path succeeds in ~12 ms, whether it comes from
+the same worker or a different one, because the VFS releases the handle when
+idle. `opfs-sahpool` is the one that cannot share, and it fails immediately and
+explicitly rather than stalling. So extra connections are allowed; they simply do
+not help.
 
 Therefore:
 
 - `busy_timeout` is pinned to **0**. A `_busy_timeout` DSN parameter is rejected.
 - `SQLITE_BUSY`/`SQLITE_LOCKED` are mapped to a Go sentinel and retried **in Go**,
   after the request has returned and the worker is free.
-- A second connection to the same file-backed database is refused with an error
-  naming `db.SetMaxOpenConns(1)`, rather than freezing for 4.5 s.
 - `sqlitewasm.OpenDB(dsn)` is provided and sets `SetMaxOpenConns(1)`. More than one
   connection buys zero parallelism — there is one JS thread — while enabling
   `SQLITE_BUSY`.

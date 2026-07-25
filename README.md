@@ -149,9 +149,11 @@ if errors.As(err, &e) {
 
 **Use one connection.** `sqlitewasm.OpenDB` does this for you.
 
-There is a single JavaScript thread behind every connection, so more connections buy no parallelism. What they do buy is `SQLITE_BUSY`: this build has no WAL — neither OPFS VFS implements `xShmMap` — so readers block writers under rollback-journal locking. And a second connection to the same **file-backed** database is refused outright, because two handles contend for the same exclusive OPFS sync access handle, which costs about 4.5 s of `Atomics.wait` inside the worker before failing anyway.
+There is a single JavaScript thread behind every connection, so more connections buy no parallelism. What they do buy is `SQLITE_BUSY`: this build has no WAL — neither OPFS VFS implements `xShmMap` — so readers block writers under rollback-journal locking. `PRAGMA journal_mode=WAL` is therefore unavailable; on `memdb` it reports `memory`.
 
-`PRAGMA journal_mode=WAL` is therefore unavailable. On `memdb` it reports `memory`.
+Extra connections are *allowed*, though, and they are not pathological: every connection on one `sql.DB` shares a worker and therefore one sqlite3 instance, so several of them can address the same OPFS file without contending for its access handle (measured at ~12 ms for the second, not the multi-second stall one might expect — the `opfs` VFS releases its sync access handle when idle).
+
+Across **separate** workers or tabs the two persistence VFSes differ: `opfs` interleaves fine, while `opfs-sahpool` holds its access handles for the pool's lifetime and a second worker fails immediately with `Access Handles cannot be created ...`.
 
 
 ## Cancellation

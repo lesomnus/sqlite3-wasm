@@ -16,9 +16,8 @@ import (
 
 // Conn is one sqlite3 handle on the connector's worker.
 type Conn struct {
-	db      *binding.DB
-	cfg     *Config
-	release func()
+	db  *binding.DB
+	cfg *Config
 
 	// inTx tracks explicit transactions so a connection returned to the pool
 	// while one is open gets rolled back rather than silently enrolling the
@@ -44,10 +43,6 @@ var (
 )
 
 func (c *Conn) Close() error {
-	if c.release != nil {
-		c.release()
-		c.release = nil
-	}
 	return c.db.Close(context.Background())
 }
 

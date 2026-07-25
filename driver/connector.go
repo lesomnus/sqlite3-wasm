@@ -17,9 +17,10 @@ import (
 // Connector owns one database worker and mints connections on it.
 //
 // One worker per Connector rather than per connection: a worker commits 16 MiB
-// of linear memory and a full wasm compile, connections to :memory: would be
-// mutually invisible across workers, and two workers on one OPFS file contend
-// for the same exclusive sync access handle.
+// of linear memory and a full wasm compile, and connections to :memory: would
+// be mutually invisible across workers. Sharing also keeps every connection on
+// one sqlite3 instance, which is what lets several of them address the same
+// OPFS file without contending for its access handle.
 type Connector struct {
 	dsn string
 	cfg *Config
@@ -35,11 +36,6 @@ type Connector struct {
 	workerOnce sync.Once
 	worker     *binding.Worker
 	workerErr  error
-
-	mu sync.Mutex
-	// open counts live connections, so a file-backed database can refuse a
-	// second one rather than stall inside the OPFS VFS.
-	open int
 }
 
 var (
@@ -76,39 +72,26 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		return nil, err
 	}
 
-	// A second handle on the same file is not slow, it is pathological: the
-	// OPFS proxy retries createSyncAccessHandle six times with escalating
-	// backoff, which is roughly 4.5 s of Atomics.wait inside the worker,
-	// freezing every other connection, and then fails anyway.
-	c.mu.Lock()
-	if c.cfg.Persistent && c.open > 0 {
-		c.mu.Unlock()
-		return nil, fmt.Errorf(
-			"sqlite3-wasm: %s is already open on this connector; "+
-				"a file-backed database supports one connection at a time — call db.SetMaxOpenConns(1) "+
-				"(sqlitewasm.OpenDB does this for you)", c.cfg.Filename)
-	}
-	c.open++
-	c.mu.Unlock()
-
-	release := func() {
-		c.mu.Lock()
-		c.open--
-		c.mu.Unlock()
-	}
-
+	// Note: several connections to the same OPFS file are fine here, and were
+	// measured to be. Every connection on a connector shares one worker and so
+	// one sqlite3 instance, which keeps its own file state; the opfs VFS also
+	// releases its sync access handle when idle, so even two separate workers
+	// interleave without stalling. (opfs-sahpool does not — it holds its
+	// handles for the pool's lifetime — but it fails immediately and says so,
+	// and one connector never creates a second worker.)
+	//
+	// What extra connections still cannot buy is parallelism: there is one
+	// JavaScript thread behind all of them. See sqlitewasm.OpenDB.
 	if err := c.checkVFS(w); err != nil {
-		release()
 		return nil, err
 	}
 
 	db, err := w.Open(ctx, c.cfg.FilenameFor(c.databaseID()), c.cfg.VFS, 0)
 	if err != nil {
-		release()
 		return nil, err
 	}
 
-	conn := &Conn{db: db, cfg: c.cfg, release: release}
+	conn := &Conn{db: db, cfg: c.cfg}
 	if c.cfg.ForeignKeys {
 		if _, err := db.Exec(ctx, "PRAGMA foreign_keys = ON", nil); err != nil {
 			_ = conn.Close()

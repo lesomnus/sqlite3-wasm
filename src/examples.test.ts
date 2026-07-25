@@ -6,6 +6,7 @@ describe("examples", () => {
 	doTest('open')
 	doTest('query')
 	doTest('driver')
+	doTest('conformance')
 })
 
 async function run(name: string): Promise<void> {

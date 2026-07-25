@@ -17,7 +17,7 @@ Design rationale: [DESIGN.md](./DESIGN.md) · Wire format: [PROTOCOL.md](./PROTO
 | 4 | Packaging | ✅ done |
 | 5 | Go transport | ✅ done |
 | 6 | database/sql driver | ✅ done |
-| 7 | Tests, examples, README | 🟡 mostly done, see below |
+| 7 | Tests, examples, README | ✅ done |
 
 Everything under `binding/` and `driver/` may be broken freely: the repository has
 no tags, so the only load-bearing public contract is the import path
@@ -173,34 +173,36 @@ transactions, int64 extremes and the error model.
 
 - [x] `internal/assert` now reports the caller's file and line and the actual
       values; it used to panic with an empty `[]string` and no location.
-- [ ] One `conformance` Go binary with subtests selected by `postMessage`, instead of
-      one wasm blob per scenario.
+- [x] An `examples/conformance` Go binary covering cancellation, abandoned result
+      sets, read-only transactions, pooled databases and the rejected DSN forms.
+- [ ] Select its subtests by `postMessage` rather than running all of them, once
+      build time becomes the bottleneck.
 - [x] `src/examples.test.ts`: `onerror`, `onmessageerror`, a per-test timeout and
       `terminate()` in a `finally`.
 - [x] `scripts/build-examples.mts` runs from an npm `pretest`, along with the
       bundle build, so neither stale wasm nor a stale `dist/` can be tested.
-- [ ] Coverage: storage-class fidelity (`int64` past 2^53, `-0.0`, `1e300`, NaN/±Inf,
+- [x] Coverage: storage-class fidelity (`int64` past 2^53, `-0.0`, `±Inf`, NaN,
       empty blob, TEXT with NUL and non-BMP runes); decltype time round trip;
       `sql.Named`; `LastInsertId`/`RowsAffected` for INSERT/UPDATE/DELETE;
-      multi-statement `Exec`; transactions and rollback; ctx cancellation;
-      `ColumnTypes()`; early `rows.Close()` mid-stream; two connections on one OPFS
-      file producing a fast explicit error; pooled memory DSN sharing one database.
-- [ ] OPFS tier gated on `crossOriginIsolated`; add `firefox` and `webkit` vitest
-      instances with at least a smoke tier.
+      multi-statement `Exec`; transactions, rollback and read-only; ctx
+      cancellation; `ColumnTypes()`; early `rows.Close()` mid-stream; pooled
+      databases sharing one database; the rejected DSN forms.
+- [x] An OPFS tier: `src/dist.test.ts` round-trips a real OPFS database across two
+      workers, against the built bundle.
+- [ ] `firefox` and `webkit` vitest instances with at least a smoke tier. Every
+      platform claim so far is Chromium-only.
 - [x] README rewritten: architecture, new import contract, DSN table, type rules and
       their divergences, error model, concurrency, cancellation, COOP/COEP **and**
       CSP, browser floor, Vite and Next.js. ncruces attribution kept, mattn and
       modernc added.
 
-Exit: `npm test` and `go test ./...` both green; README describes what actually ships.
+Exit: **met** — `npm test` (146 tests) and `go test ./...` are green, and the README
+describes what ships. Cross-browser coverage is the one thing still outstanding.
 
 ---
 
 ## Open questions
 
-- Does `opfs-sahpool` have the same one-handle-per-path constraint as `opfs`? It is
-  the recommended no-COI persistence tier, so this must be measured before the README
-  recommends it for multi-connection use.
 - Progress-handler instruction count: start at ~10 000 VDBE ops and measure. Each
   firing costs a wasm→JS call plus an `Atomics.load`.
 - Whether to offer WAL at all via `PRAGMA locking_mode=exclusive` (heap wal-index).
@@ -212,6 +214,37 @@ Exit: `npm test` and `go test ./...` both green; README describes what actually 
 ---
 
 ## Changelog
+
+### Phases 4–7 — packaging, transport, driver, tests
+
+The whole stack runs: Go/wasm -> `binding` -> binary frames -> the DB worker ->
+the sqlite3 C API, and back. `npm test` builds the examples and the bundle first,
+then runs 146 tests across a node tier and a browser tier.
+
+Packaging turned out to be exactly as predicted. A plain library build emitted a
+second, unused 1.59 MB copy of sqlite3 (the package entry side-effect-imports the
+worker1 promiser), left the OPFS async proxy as a sibling asset a consumer's build
+would not copy, and kept Vite's `data:` worker fallback — which is not
+cross-origin isolated, so it would have silently cost OPFS *and* cancellation.
+`scripts/vite-plugin-sqlite3-inline.ts` fixes all three, and the result is checked
+rather than assumed: the built artifact is asserted for shape and then *run*,
+round-tripping an OPFS database across two separate workers.
+
+**One design decision was refuted by measurement and removed.** The review's
+concern that a second connection to an OPFS file would stall for ~4.5 s inside
+`Atomics.wait` had been implemented as an outright refusal in `Connector.Connect`.
+Measured in Chromium 141, a second handle on the same OPFS path opens in ~12 ms —
+from the same worker *or* a different one — because the `opfs` VFS releases its
+sync access handle when idle. `opfs-sahpool` is the one that cannot share, and it
+fails immediately with a clear DOM error rather than stalling. The restriction was
+dropped, and the same probe closed the open question about `opfs-sahpool`.
+`sqlitewasm.OpenDB` still pins `SetMaxOpenConns(1)`, but now for the reason that
+actually holds: one JavaScript thread means extra connections buy no parallelism.
+
+Two smaller things worth recording: `internal/assert` now reports the caller's file
+and line (it used to panic with an empty `[]string`), and the example runner
+forwards `console.error` as well as `console.log` — a failing Go example surfaced
+as a bare "exit code 2" with the panic message nowhere to be seen.
 
 ### Phase 3 — the DB worker
 
