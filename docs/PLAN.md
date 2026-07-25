@@ -13,7 +13,7 @@ Design rationale: [DESIGN.md](./DESIGN.md) · Wire format: [PROTOCOL.md](./PROTO
 | 0 | Design documents | ✅ done |
 | 1 | Wire codec + golden vectors | ✅ done |
 | 2 | DSN parser + type mapping | ✅ done |
-| 3 | DB worker | ⬜ not started |
+| 3 | DB worker | ✅ done |
 | 4 | Packaging | ⬜ not started |
 | 5 | Go transport | ⬜ not started |
 | 6 | database/sql driver | ⬜ not started |
@@ -70,27 +70,29 @@ Exit: **met** — `go test ./...` covers DSN, decltype, time and conversion with
 
 ## Phase 3 — DB worker
 
-- [ ] `src/worker/index.ts` — synchronous pre-`await` message buffer, init,
-      `instantiateWasm` hook, capability probe, `READY`.
-- [ ] `src/worker/db.ts` — OPEN (VFS ladder, `extended_result_codes`,
-      `busy_timeout=0`, progress handler install + probe), CLOSE.
-- [ ] `src/worker/stmt.ts` — `sqlite3_prepare_v3` pointer form with tail iteration
-      (copy `oo1.DB.exec`, `sqlite3.mjs:10638-10707`), bind, finalize.
-- [ ] `src/worker/rows.ts` — step loop, `sqlite3_column_type` first, raw heap reads,
-      geometric batch growth, `MessageChannel` yield between flushes, credit window,
-      abort.
-- [ ] `src/worker/exec.ts` — multi-statement tail loop, per-statement arg
-      consumption, `changes64` + `last_insert_rowid` captured at exec time.
-- [ ] `src/worker/cache.ts` — LRU of `sqlite3_stmt*` per db, `SQLITE_PREPARE_PERSISTENT`,
-      reset + clear_bindings on release, flush on `SQLITE_SCHEMA` and DDL.
-- [ ] `src/worker/error.ts` — copy `errmsg` synchronously from a fresh `heap8u()`.
-- [ ] **Hot loop bound to `sqlite3.wasm.exports.*`, not `capi.*`** — 634 → 86 ns/cell.
-      Hoist the handles once at init. `capi.*` for the cold path only.
-- [ ] vitest browser tests driving the worker over the raw protocol, no Go involved.
-- [ ] Microbenchmark asserting the `capi` → raw-exports win did not regress, and
-      pinning the progress-handler instruction interval (start ~10k VDBE ops).
+- [x] `src/worker/early.ts` — the synchronous pre-`await` message buffer, imported
+      first so it beats any dependency's top-level await.
+- [x] `src/worker/index.ts` — init, capability probe, `READY`, dispatcher.
+      (`instantiateWasm` moves here in phase 4, with the inlined build.)
+- [x] OPEN (VFS ladder, `extended_result_codes`, `busy_timeout=0`, progress
+      handler install + probe) and CLOSE, in `src/worker/session.ts`.
+- [x] `sqlite3_prepare_v3` pointer form with tail iteration, bind, finalize.
+- [x] Step loop, `sqlite3_column_type` first, raw heap reads, geometric batch
+      growth, `MessageChannel` yield between flushes, credit window, abort.
+- [x] Multi-statement tail loop, per-statement arg consumption, `changes64` +
+      `last_insert_rowid` captured at exec time.
+- [x] LRU of `sqlite3_stmt*` per db, `SQLITE_PREPARE_PERSISTENT`, reset +
+      clear_bindings on release. Columns are deliberately **not** cached — see
+      the changelog.
+- [x] Errors carry rc, extended rc, `sqlite3_error_offset` and the message.
+- [x] **Hot loop bound to `sqlite3.wasm.exports.*`, not `capi.*`** — 634 → 86 ns/cell.
+      `capi.*` for the cold path only.
+- [x] 43 vitest browser tests driving the worker over the raw protocol via
+      `src/worker/client.ts`, no Go involved.
+- [ ] Microbenchmark asserting the `capi` → raw-exports win did not regress
+      (deferred to phase 7). Progress-handler interval pinned at 10k VDBE ops.
 
-Exit: the worker passes a protocol-level conformance suite in Chromium.
+Exit: **met** — 43 protocol-level tests pass in Chromium.
 
 ## Phase 4 — Packaging
 
@@ -196,6 +198,32 @@ Exit: `npm test` and `go test ./...` both green; README describes what actually 
 ---
 
 ## Changelog
+
+### Phase 3 — the DB worker
+
+`src/worker/` speaks the protocol directly against the sqlite3 C API. 43 browser
+tests drive it over the wire with no Go involved, so a failure there is the
+worker's and not the transport's.
+
+The probe that came first was worth it — every primitive was checked against the
+real build before a line of the worker was written: raw exports and their calling
+convention, `SQLITE_WASM_DEALLOC`, the pointer form of `sqlite3_prepare_v3` and its
+tail, binding through heap pointers, reading raw column bytes, and the progress
+handler aborting a step with `SQLITE_INTERRUPT` while `sqlite3_finalize` returns 9
+too.
+
+Two behaviours found along the way, both now asserted:
+
+- **SQLite normalises `-0.0` to `+0.0` in a column with REAL affinity**, but
+  preserves it in a column with no affinity. Neither is our bug; the test says so
+  explicitly so nobody "fixes" it later.
+- **A cached statement's column list goes stale.** `sqlite3_prepare_v3`
+  transparently recompiles after a schema change, so execution is correct — but
+  the description captured at prepare time is not, and `SELECT *` after
+  `ALTER TABLE ADD COLUMN` reported the old columns. The row loop now reads
+  columns *after the first step*, when the recompile has happened. Everything
+  else about a statement (parameter count and names, readonly) is syntactic and
+  still cached.
 
 ### Phase 2 — DSN, declared types, time and conversion
 

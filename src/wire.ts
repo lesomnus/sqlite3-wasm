@@ -136,6 +136,21 @@ export class FrameWriter {
 		this.view = new DataView(next.buffer)
 	}
 
+	/**
+	 * Reserves a u32 and returns its offset. The row encoder cannot know a
+	 * batch's row count until the batch is full, but the count is specified to
+	 * come before the rows, so it is patched in at flush time.
+	 */
+	reserveU32(): number {
+		const at = this.n
+		this.u32(0)
+		return at
+	}
+
+	patchU32(at: number, v: number): void {
+		this.view.setUint32(at, v, true)
+	}
+
 	u8(v: number): void {
 		this.grow(1)
 		this.view.setUint8(this.n, v)
@@ -248,10 +263,10 @@ export class FrameReader {
 	private view: DataView
 	private i = 0
 
-	constructor(
-		private buf: Uint8Array,
-		start = 0,
-	) {
+	private buf: Uint8Array
+
+	constructor(buf: Uint8Array, start = 0) {
+		this.buf = buf
 		this.view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
 		this.i = start
 	}

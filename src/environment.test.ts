@@ -16,7 +16,10 @@ test('OPFS is reachable from the page', () => {
 	// createSyncAccessHandle is [Exposed=DedicatedWorker], so it is absent
 	// here by design. That is why sqlite3 refuses to install the opfs VFS
 	// outside a worker.
-	expect(FileSystemFileHandle.prototype.createSyncAccessHandle).toBeUndefined()
+	expect(
+		(FileSystemFileHandle.prototype as unknown as Record<string, unknown>)
+			.createSyncAccessHandle,
+	).toBeUndefined()
 })
 
 // The whole distribution strategy rests on this: the DB worker ships as an
