@@ -137,6 +137,17 @@ rendering.
 `NULL`, `''`, `x''` and `zeroblob(0)` are indistinguishable by pointer and length —
 only `sqlite3_column_type` separates them.
 
+`REAL` non-finite handling, verified against SQLite 3.50.4:
+
+- A bound `NaN` is stored by SQLite as `NULL`, so a `NaN` only ever travels
+  Go → worker and never comes back.
+- `±Infinity` is stored as `REAL` and round-trips unchanged.
+- **NaN payload bits are not part of this contract.** Go's `math.NaN()` is
+  `0x7FF8000000000001` while JS and the vector generator produce
+  `0x7FF8000000000000`, and JS typed arrays are permitted to canonicalise NaN
+  regardless. A NaN is delivered as *a* NaN; the golden corpus pins the canonical
+  quiet NaN and the codecs compare NaN by predicate, not by bit pattern.
+
 ### 4.3 *args*
 
 ```

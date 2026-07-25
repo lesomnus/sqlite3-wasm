@@ -36,13 +36,18 @@ export default defineConfig({
     exclude: ['@sqlite.org/sqlite-wasm'],
   },
   test: {
-    browser: {
-      enabled: true,
-      provider: playwright(),
-      // https://vitest.dev/guide/browser/playwright
-      instances: [
-        { browser: 'chromium', headless: true },
-      ],
-    },
+    // Two tiers. The wire codec is plain byte manipulation with no DOM in it,
+    // so it runs in node where it is fast and debuggable; everything that
+    // touches sqlite3, workers, OPFS or Go/wasm needs a real browser.
+    projects: [
+      {
+        test: {
+          name: 'node',
+          environment: 'node',
+          include: ['src/**/*.node.test.ts'],
+        },
+      },
+      './vitest.browser.config.ts',
+    ],
   },
 })
