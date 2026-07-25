@@ -60,7 +60,7 @@ browser.
 - [ ] `driver/timefmt.go` — layout list, `Z` handling, `ParseInLocation`, write formats.
 - [ ] `driver/convert.go` — `(tag, declType) → driver.Value` and the reverse.
 - [ ] Host tests including the parse matrix from
-      [PROTOCOL.md §8](./PROTOCOL.md#8-type-mapping) and both incumbents' edge cases.
+      [PROTOCOL.md §9](./PROTOCOL.md#9-type-mapping) and both incumbents' edge cases.
 
 Exit: `GOOS=linux go test ./...` covers DSN, decltype, time and conversion.
 
@@ -73,11 +73,18 @@ Exit: `GOOS=linux go test ./...` covers DSN, decltype, time and conversion.
 - [ ] `src/worker/stmt.ts` — `sqlite3_prepare_v3` pointer form with tail iteration
       (copy `oo1.DB.exec`, `sqlite3.mjs:10638-10707`), bind, finalize.
 - [ ] `src/worker/rows.ts` — step loop, `sqlite3_column_type` first, raw heap reads,
-      batch flush, credit window, abort.
+      geometric batch growth, `MessageChannel` yield between flushes, credit window,
+      abort.
 - [ ] `src/worker/exec.ts` — multi-statement tail loop, per-statement arg
       consumption, `changes64` + `last_insert_rowid` captured at exec time.
+- [ ] `src/worker/cache.ts` — LRU of `sqlite3_stmt*` per db, `SQLITE_PREPARE_PERSISTENT`,
+      reset + clear_bindings on release, flush on `SQLITE_SCHEMA` and DDL.
 - [ ] `src/worker/error.ts` — copy `errmsg` synchronously from a fresh `heap8u()`.
+- [ ] **Hot loop bound to `sqlite3.wasm.exports.*`, not `capi.*`** — 634 → 86 ns/cell.
+      Hoist the handles once at init. `capi.*` for the cold path only.
 - [ ] vitest browser tests driving the worker over the raw protocol, no Go involved.
+- [ ] Microbenchmark asserting the `capi` → raw-exports win did not regress, and
+      pinning the progress-handler instruction interval (start ~10k VDBE ops).
 
 Exit: the worker passes a protocol-level conformance suite in Chromium.
 
@@ -128,7 +135,9 @@ Exit: a Go program can open, query, and cancel through the worker.
 - [ ] `Stmt`: `StmtExecContext`, `StmtQueryContext`, `NumInput` per
       [PROTOCOL.md §4.5](./PROTOCOL.md#45-prepared).
 - [ ] `Rows`: `RowsColumnTypeDatabaseTypeName`, `RowsColumnTypeScanType`; bare
-      `io.EOF`; non-blocking `Close`; ctx polled in `Next`.
+      `io.EOF`; non-blocking `Close`; ctx polled in `Next`; **decode one row at a
+      time straight into the `dest []driver.Value` slice** — never materialise a
+      `[][]driver.Value` (95 % of Go-side cost is interface boxing).
 - [ ] `Tx`: `BEGIN IMMEDIATE` by default, reject non-default isolation, map `ReadOnly`.
 - [ ] Error model: `*sqlitewasm.Error` with rc / extended rc / message / offset,
       `Is` support, `ErrBusy` / `ErrConstraint`; Go-side `SQLITE_BUSY` retry;
@@ -176,6 +185,9 @@ Exit: `npm test` and `go test ./...` both green; README describes what actually 
   firing costs a wasm→JS call plus an `Atomics.load`.
 - Whether to offer WAL at all via `PRAGMA locking_mode=exclusive` (heap wal-index).
   Currently planned as: detect and reject with a clear message.
+- Batch-buffer recycling (Go returns a spent buffer in the transfer list of its next
+  request). Worth ~10 µs per 256 KiB batch; deferred until phase 3 benchmarks say the
+  allocation actually shows up.
 
 ---
 
@@ -194,3 +206,27 @@ Also repaired the local test harness: the Playwright browser download extracts o
 `v8_context_snapshot.bin`, so `chromium_headless_shell-1194` was installed by hand.
 `npx vitest run` and the Go-in-worker example suite both pass on the pre-rewrite code,
 which gives the rewrite a working baseline to regress against.
+
+The design was then reviewed against measurements rather than intuition, which moved
+three things:
+
+- **The encoding is not the bottleneck.** Per cell, sqlite3 extraction + encoding
+  costs 634 ns through `capi.*` wrappers versus 86 ns through `wasm.exports.*`;
+  transport is ~1 ns and the Go-side parse 0.58 ns. Row-major vs columnar and
+  fixed64 vs varint were both benchmarked and are noise. The plan now targets the
+  wrapper overhead and the round-trip count instead.
+- **Round trips dominate small queries.** A worker↔worker round trip is a flat
+  ~32 µs against ~1 µs for a cached point query, so `QUERY`/`EXEC` are fused into one
+  message and the worker keeps a statement cache (7 155 ns uncached → 972 ns cached).
+- **Eager push needed bounding in three ways**: geometric batch growth so the first
+  row does not wait for 1024 steps, a `MessageChannel` macrotask yield so one scan
+  cannot block every other pooled connection, and a 4-batch credit window so a slow
+  consumer cannot OOM the tab.
+
+Blockers found and folded in before any code was written: the DB worker must install
+a message buffer *before* its first `await` (messages posted right after
+`new Worker()` are otherwise silently dropped — reproduced); the cancellation word
+must hold a request generation rather than a boolean; pooled `:memory:` is silently
+broken by `SQLITE_OMIT_SHARED_CACHE` and must be rewritten onto the `memdb` VFS; and
+a non-zero `busy_timeout` self-deadlocks the worker because SQLite's busy sleep is
+`Atomics.wait` on that same thread.

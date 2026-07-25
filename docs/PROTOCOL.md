@@ -57,13 +57,24 @@ request" in the cancellation word, §6).
 | `0x02` | `CLOSE` | `u32 dbId` |
 | `0x03` | `PREPARE` | `u32 dbId`, `string sql` |
 | `0x04` | `FINALIZE` | `u32 stmtId` |
-| `0x05` | `QUERY` | `u32 dbId`, `string sql`, *args* |
+| `0x05` | `QUERY` | `u32 dbId`, `string sql`, *args* — fused: prepare, bind, step, stream, auto-finalise |
 | `0x06` | `QUERY_STMT` | `u32 stmtId`, *args* |
-| `0x07` | `EXEC` | `u32 dbId`, `string sql`, *args* |
+| `0x07` | `EXEC` | `u32 dbId`, `string sql`, *args* — fused; loops the multi-statement tail |
 | `0x08` | `EXEC_STMT` | `u32 stmtId`, *args* |
 | `0x09` | `CREDIT` | `u32 batches` — `id` is the streaming request's id |
-| `0x0A` | `ABORT` | *(empty)* — `id` is the streaming request's id |
+| `0x0A` | `ABORT` | *(empty)* — `id` is the streaming request's id; fire-and-forget |
 | `0x0B` | `SHUTDOWN` | *(empty)* |
+
+`QUERY` and `EXEC` carry SQL and arguments in a **single** message and finalise (or
+return to the statement cache, §8) on their own. `db.Query(sql, args...)` therefore
+costs one round trip, not `PREPARE` + `QUERY_STMT` + `FINALIZE`. That matters: a
+worker↔worker round trip is a flat ~32 µs while a cached point query inside SQLite
+is ~1 µs, so the split form would spend 33× more on transport than on work.
+`PREPARE`/`QUERY_STMT`/`EXEC_STMT`/`FINALIZE` exist only for `ConnPrepareContext`.
+
+There is deliberately **no `INTERRUPT` op**. The worker is inside `sqlite3_step` and
+cannot dequeue a message, and `sqlite3_interrupt` is useless in this
+`THREADSAFE=0`, non-shared-memory build. Cancellation is §6 and only §6.
 
 ### 3.2 Responses (DB worker → Go)
 
@@ -269,27 +280,67 @@ for the degraded path.
 
 ## 7. Flow control
 
-The worker may have at most `CREDIT_WINDOW` unacknowledged `ROWS` frames in flight
-per request. Having spent its credit it returns to its event loop and waits for a
-`CREDIT` frame. Go grants credit from the `Rows.Next` consumer — never from the
-message callback.
+`ROWS` frames are pushed eagerly: one request produces N frames with no per-batch
+round trip. Three rules bound it.
 
-Defaults:
+**Geometric batch sizes.** Batches grow `1 → 8 → 64 → 512 → 1024` rows, capped
+independently by bytes at `1 KiB → 4 KiB → 32 KiB → 256 KiB`. The first row reaches
+Go after a single `sqlite3_step` instead of after 1024. A one-way push costs 4.4 µs
+at 256 B and 29.6 µs at 256 KiB, so a small first batch is nearly free.
 
-| constant | value |
-| --- | --- |
-| `MAX_BATCH_ROWS` | 1024 |
-| `MAX_BATCH_BYTES` | 256 KiB |
-| `CREDIT_WINDOW` | 4 |
+`MAX_BATCH_BYTES` = 256 KiB is a hard ceiling. Round-trip time is flat at
+31.8–37.4 µs from 4 KiB to 256 KiB but jumps to 127.6 µs at 1 MiB — that is
+allocating and zeroing the payload, not transferring it. A single value larger than
+the ceiling (a 10 MB blob) is sent in its own oversized frame rather than blowing the
+budget silently.
 
-`ABORT` stops a stream. Go may send it at any time and must not wait for the reply;
-the worker responds with `ABORTED`. Frames that arrive for an aborted or unknown
-`id` are **discarded**, not treated as protocol errors.
+**A yield between batches.** After each `postMessage` the worker returns to its event
+loop so queued requests from other connections get serviced; otherwise a 100 000-row
+scan blocks the whole worker for ~34 ms. It must be a **macrotask** — `await null`
+does not drain the `postMessage` task queue, and `setTimeout(…, 0)` is clamped to
+4 ms once nested more than five deep — so use a `MessageChannel` self-ping.
 
-`Rows.Close` must never block — it is called from `awaitDone` while holding the
-connection mutex.
+**A credit window.** At most `CREDIT_WINDOW` = 4 unacknowledged frames may be in
+flight per request. Go grants credit from the `Rows.Next` consumer, never from the
+message callback. This is a window, not a request/response per batch.
 
-## 8. Type mapping
+`ABORT` stops a stream early. It is fire-and-forget; Go must not wait for the reply.
+The worker answers with `ABORTED`. Frames arriving for an aborted or unknown `id` are
+**discarded**, not treated as protocol errors.
+
+After an `EOF` frame Go sends nothing at all — the worker has already finalised or
+cached the statement. `Rows.Close` after EOF is therefore free, and `Rows.Close`
+before EOF costs one fire-and-forget `ABORT`. `Rows.Close` must never block: it is
+called from `awaitDone` while holding the connection mutex.
+
+Optional, and gated on measurement: Go may return a spent batch buffer to the worker
+by including it in the transfer list of its *next* request, letting the worker keep a
+small free list instead of allocating each batch. A dedicated message for this would
+cost more (4.4 µs) than it saves.
+
+## 8. Statement cache
+
+The worker keeps an LRU of `sqlite3_stmt*` keyed by `(dbId, sql)`, default 64 entries
+per database handle, prepared with `SQLITE_PREPARE_PERSISTENT`. A fused `QUERY` or
+`EXEC` takes a statement from the cache when one matches and returns it on completion
+via `sqlite3_reset` + `sqlite3_clear_bindings`.
+
+Measured against an indexed 1-row query: `prepare_v3` + `finalize` alone is 4 589 ns,
+the uncached path is 7 155 ns, the cached path is 972 ns, and reset + clear_bindings
+is 390 ns.
+
+Rules:
+
+- A statement whose prepare left a non-empty tail is **never** cached.
+- The cache for a database is flushed on `SQLITE_SCHEMA` (17) from `step` or `reset`,
+  and on any DDL routed through `EXEC`.
+- Evicted and flushed statements are finalised immediately.
+- `CLOSE` finalises every cached statement before `sqlite3_close_v2`.
+
+The cache is in the worker, not in Go: a Go-side cache could avoid the recompile but
+not the round trip.
+
+## 9. Type mapping
 
 Applied on the Go side. `declType` is normalised once at prepare:
 `strings.ToUpper(strings.TrimSpace(s))`, then cut at the first `(`.
@@ -370,7 +421,7 @@ called before the first `Next()`. Never returns `nil`.
 | `boolClass` | `sql.NullBool` |
 | anything else | `any` |
 
-## 9. DSN
+## 10. DSN
 
 ```
 file:name.db?vfs=opfs&_loc=UTC&_fk=1
@@ -402,7 +453,7 @@ instead of N invisible ones.
 Under `GOOS=js`, `time.Local` is UTC unless tzdata is embedded — `_loc=auto` is
 documented accordingly.
 
-## 10. Versioning
+## 11. Versioning
 
 `protocolVersion` appears in three places and all three must agree:
 

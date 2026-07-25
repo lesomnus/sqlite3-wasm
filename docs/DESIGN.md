@@ -72,20 +72,55 @@ worker1 never sends: the per-value **storage class**
 through the worker1 message protocol. So the protocol has to be ours.
 
 Once we own the protocol, the per-row `postMessage` and the per-cell
-`syscall/js` traffic go away too. Measured on this machine (Node 24, Go 1.26):
+`syscall/js` traffic go away too. The old path costs, measured with Go 1.26 under
+Node 24:
 
 | operation | cost |
 | --- | --- |
 | `js.Value.Index()` → number | 102–110 ns |
 | `js.Value.Get()` → object/string | 1.9–3.3 µs (dominated by `runtime.SetFinalizer` in `makeValue`) |
-| `js.CopyBytesToGo`, 4 KiB | 182 ns |
-| `js.CopyBytesToGo`, 1 MiB | 30.6 µs |
-| `postMessage` of a transferred 256 B buffer | 75.8 µs |
 | decode 5 000 cells via per-cell `Index` | **51.3 ms** |
 | decode 5 000 cells via one `CopyBytesToGo` + pure Go | **0.90 ms** |
 
 57× on decoding, ~146× on messaging. The win is not the memory copy — it is never
 materialising a `js.Value` per cell.
+
+### 2.1 …but the boundary is not where the time goes
+
+Having removed that, the remaining per-cell budget was measured again, this time in
+Chromium under cross-origin isolation with a real worker→worker link and the real
+sqlite3 build. It reorders the priorities completely:
+
+| stage, per cell of a 4-column scan | cost |
+| --- | --- |
+| sqlite3 extract + encode via `capi.*` wrappers | **634 ns** |
+| the same via raw `wasm.exports.*` | **86 ns** |
+| `postMessage` transport at 256 KiB batches | ~1 ns |
+| `js.CopyBytesToGo` | ~0.3 ns |
+| pure-Go parse | 0.58 ns |
+| boxing into `driver.Value` | 11 ns |
+
+Over 70 % of the cost of a row is `wasm.xWrap` argument/result adapters inside the
+`capi.*` functions — not the wire format, not the transport, not Go. The entire
+columnar-vs-row-major and varint-vs-fixed64 question is worth single-digit
+nanoseconds against a 634 ns baseline; both were benchmarked and both are noise.
+
+Latency tells the same story:
+
+| operation | cost |
+| --- | --- |
+| worker↔worker `postMessage` round trip | **32 µs**, flat from 64 B to 256 KiB |
+| the same at 1 MiB | 128 µs |
+| `SharedArrayBuffer` + `Atomics` round trip | 8.7 µs |
+| cached indexed 1-row query inside sqlite3 | **0.97 µs** |
+| `sqlite3_prepare_v3` + `sqlite3_finalize` | 4.6 µs |
+
+A point query — the dominant ORM call — is ~1 µs of SQLite work. Spending two round
+trips (64 µs) plus a recompile (4.6 µs) on it would make transport 33× the query.
+
+So three decisions matter far more than the encoding, and all three are in §4.6–4.8:
+**raw exports in the row loop**, **one fused round trip per query**, and **a
+statement cache in the worker**.
 
 ## 3. Architecture
 
@@ -161,7 +196,7 @@ decltype is more robust than expected. Verified against SQLite 3.50.4: it surviv
 worth documenting: `SELECT a FROM t UNION ALL SELECT b FROM u` reports the **first
 arm's** decltype for the whole column.
 
-The conversion table is in [PROTOCOL.md §7](./PROTOCOL.md#7-type-mapping).
+The conversion table is in [PROTOCOL.md §9](./PROTOCOL.md#9-type-mapping).
 
 `RowsColumnTypeNullable` is **not implemented**. Returning `ok=false` is
 byte-for-byte identical to omitting the method (`sql.go:3295-3297`), so it would be
@@ -201,20 +236,130 @@ request. Never return `driver.ErrBadConn` from the operation itself — `db.retr
 would re-run a statement that may already have executed, up to three times
 (`sql.go:1569-1584`).
 
-### 4.5 Backpressure: a credit window
+### 4.5 Streaming: eager push, geometric batches, a yield, and a credit window
 
-Row batches are pushed without a per-batch round trip, but not without bound: the
-worker may have at most `K` unacknowledged batches in flight (default 4 batches of
-≤1024 rows / ≤256 KiB) before it must return to its event loop and wait for a
-`CREDIT` frame. Without this a slow `Rows.Next` consumer accumulates the whole
-result set in memory twice.
+Row batches are pushed eagerly — one request produces N result messages with no
+per-batch round trip. This genuinely works in the direction that matters: a worker
+that posts a batch and then busy-spins for 100 ms without yielding still has each
+batch delivered to its parent ~0.3 ms after posting. (The rule "never `postMessage`
+then block in the same task" applies to the parent→nested direction combined with
+`Atomics.wait` on the receiver; it does not forbid eager outbound streaming.)
 
-The window also gives `Rows.Close` a cheap abort path: stop granting credit and send
-`ABORT`. `Rows.Close` must **never block** — it is called from `awaitDone` while
-holding the connection mutex (`sql.go:3443`, `:3455-3457`), so a blocking Close
-pins a pooled connection for as long as the worker takes.
+Three refinements, each with a measured reason:
 
-### 4.6 One database connection, deliberately
+**Geometric batch growth.** A fixed 1024-row threshold means `rows.Next()` blocks
+until 1024 rows have been stepped, and a query abandoned after one row pays for a
+whole batch. One-way push costs 4.4 µs at 256 B and 29.6 µs at 256 KiB — the fixed
+per-message cost is tiny, so a small first batch is nearly free. Batches therefore
+grow 1 → 8 → 64 → 512 → 1024 rows (1 KiB → 4 KiB → 32 KiB → 256 KiB by bytes). The
+first row reaches Go after one step; steady-state amortisation is unchanged.
+
+256 KiB stays a hard ceiling. Round-trip time is flat at 31.8–37.4 µs from 4 KiB to
+256 KiB but jumps to 127.6 µs at 1 MiB — that is allocation and zeroing of the
+payload, not transfer, which is O(1) for a detachable buffer.
+
+**A yield between batches.** One DB worker serves every connection on a Connector.
+Without yielding, a 100 000-row scan sits in its step loop for ~34 ms and cannot
+dispatch anything else — head-of-line blocking that `database/sql` has no visibility
+into. So the worker returns to its event loop after each flush. It must be a
+*macrotask*: `await null` does not drain the `postMessage` task queue, and
+`setTimeout(…, 0)` is clamped to 4 ms once nested more than five deep, so the yield
+uses a `MessageChannel` self-ping. Cost: one macrotask per batch.
+
+**A credit window.** The worker may have at most `CREDIT_WINDOW` (4) unacknowledged
+batches in flight. Without a bound, a slow `Rows.Next` consumer accumulates a whole
+result set in memory twice — a 500 MB table takes the tab down. Because the worker
+already yields per batch, checking credit is nearly free. This is a *window*, not a
+request/response per batch; the distinction is the point.
+
+`Rows.Close` must **never block** — it is called from `awaitDone` while holding the
+connection mutex (`sql.go:3443`, `:3455-3457`), so a blocking Close pins a pooled
+connection for as long as the worker takes. After EOF it sends nothing at all; before
+EOF it sends a fire-and-forget `ABORT` and stops granting credit. Batches already in
+flight for a dead request are discarded, not treated as protocol errors.
+
+### 4.6 The row loop uses raw wasm exports
+
+`sqlite3.capi.*` functions are `wasm.xWrap`-generated wrappers that run per-argument
+adapters (pointer coercion, result adapters) on every call. On a 50 000-row,
+4-column scan:
+
+| call | via `capi.*` | via `wasm.exports.*` |
+| --- | --- | --- |
+| `sqlite3_step` | 304.9 ns/row | 108.5 ns/row |
+| `sqlite3_column_type` | 264.3 ns/cell | 33.3 ns/cell |
+| `sqlite3_column_int64` | 343.0 ns/cell | 45.5 ns/cell |
+| full extract + encode loop | **634.4 ns/cell** | **85.7 ns/cell** |
+
+On a 100 000 × 4 scan that is 254 ms versus 34 ms.
+
+`wasm.exports` is documented public surface (`index.d.ts:2286-2300`, "available for
+those who want to make use of it") and is present in the bundler-friendly build. The
+hot-loop functions all take and return only `i32`/`f64`/`i64`, so no marshalling is
+needed and none is lost — raw `sqlite3_column_int64` still returns a JS `BigInt`
+(wasm `i64` integration) and raw `sqlite3_column_blob` still returns an `i32` heap
+pointer, exactly what the encoder wants.
+
+`capi.*` stays for the cold path — `prepare_v3` with heap-copied SQL, `open_v2`,
+`errmsg`, `error_offset`, `bind_text`/`bind_blob`, `decltype`, `parameter_name` —
+where the adapters earn their keep.
+
+### 4.7 One fused round trip per query
+
+`db.Query(sql, args...)` must not cost PREPARE + QUERY + FINALIZE. At a flat 32 µs
+per round trip that is 64 µs of transport plus 4.6 µs of recompilation wrapped
+around ~1 µs of work.
+
+So `QUERY{dbId, sql, values}` is fused exactly like `EXEC`: prepare, bind, step,
+stream, auto-finalise, all inside one dispatcher call. Column names and decltypes
+are answerable immediately after prepare — before the first step — so they ride in
+the header of the first `ROWS` frame instead of a separate `PREPARED` reply.
+`QueryerContext` and `ExecerContext` use this op; the explicit `PREPARE` op exists
+only for `ConnPrepareContext` (`db.Prepare`).
+
+Halving a point query's wall clock (~71 µs → ~33 µs) is a bigger win than every
+encoding decision combined.
+
+### 4.8 A statement cache in the DB worker
+
+Even fused, every call otherwise recompiles. Measured against an indexed 1-row query:
+
+| path | cost |
+| --- | --- |
+| `prepare_v3` + `finalize` alone | 4 589 ns |
+| uncached `prepare + bind + step + read + finalize` | 7 155 ns |
+| cached `reset + bind + step + read` | **972 ns** |
+| `reset` + `clear_bindings` on release | 390 ns |
+
+That is 6.2 µs of waste per query — ~19 % of a round trip — and it grows with SQL
+length, so a 500-character ORM `SELECT` costs far more than the 30-character probe.
+
+An LRU of `sqlite3_stmt*` keyed by `(dbId, sql)`, default 64 entries per handle,
+prepared with `SQLITE_PREPARE_PERSISTENT`. Released with `sqlite3_reset` +
+`sqlite3_clear_bindings`. Invalidated on `SQLITE_SCHEMA` (17) from step or reset, and
+on any DDL routed through `EXEC`. Statements whose prepare tail was non-empty are
+never cached.
+
+The cache belongs in the worker, not in Go: a Go-side cache could only avoid the
+compile, not the round trip.
+
+### 4.9 Decode lazily into the destination slice
+
+95 % of the Go-side cost is boxing into the `driver.Value` interface, not parsing.
+Measured natively on 1000 × 8 `int64` cells: decoding into `[]driver.Value` costs
+11.55 ns/cell with 7 744 allocations per 8 000 cells; the identical bytes into
+`[]int64` cost 0.58 ns/cell with zero allocations. `TEXT` is worse — 39.7 ns/cell,
+dominated by the `string(...)` allocation.
+
+So a batch is never materialised as `[][]driver.Value`. The `[]byte` stays alive for
+the life of the batch and `Rows.Next` decodes one row at a time directly into the
+`dest []driver.Value` slice that `database/sql` reuses across calls. This is natural
+with the row-major layout, and is a concrete reason to keep it.
+
+The boxing cost itself is not worth chasing — 11 ns against 86 ns of unavoidable
+JS-side work per cell — but multiplying it by materialising whole batches up front is.
+
+### 4.10 One database connection, deliberately
 
 This is the decision most likely to surprise. The wasm build has
 `SQLITE_OMIT_SHARED_CACHE` and `THREADSAFE=0`, and neither OPFS VFS implements
@@ -246,7 +391,7 @@ Therefore:
 - Explicit write transactions default to `BEGIN IMMEDIATE` (`_txlock=immediate`) so
   lock upgrades cannot happen mid-transaction.
 
-### 4.7 In-memory databases go through the `memdb` VFS
+### 4.11 In-memory databases go through the `memdb` VFS
 
 `file:x?mode=memory&cache=shared` — the DSN every migrating user pastes — returns
 `rc=0` and then yields *mutually invisible* databases, because
@@ -260,7 +405,7 @@ The `memdb` VFS is compiled in and does share state across handles (verified). S
 - Bare `:memory:` and `mode=memory` are rewritten to
   `file:/<connector-scoped-id>?vfs=memdb`, and the rewrite is documented.
 
-### 4.8 Distribution: one inlined blob worker, zero consumer config
+### 4.12 Distribution: one inlined blob worker, zero consumer config
 
 The requirement is that a consumer writes no JavaScript glue and no bundler
 configuration. Four options were built and measured against downstream Vite dev,
@@ -297,7 +442,7 @@ version is pinned exactly — the build string-patches
 `sqlite3-bundler-friendly.mjs:12050-12052` (which hardcodes the OPFS proxy URL with
 no escape hatch) and fails loudly if the needle is missing.
 
-### 4.9 The Go worker bootstrap ships too
+### 4.13 The Go worker bootstrap ships too
 
 "Zero JavaScript" is false if the consumer still has to hand-write the Go worker
 entry — vendoring `wasm_exec.js`, resolving the Go `.wasm` URL,
@@ -315,7 +460,7 @@ What the consumer still owns, and what the README must say: resolving their own 
 **The library import must be evaluated inside the Go worker's global scope.**
 Importing it on the main thread installs the global in the wrong realm.
 
-### 4.10 Handshake, not polling
+### 4.14 Handshake, not polling
 
 The DB worker's first *synchronous* statement buffers incoming messages:
 
@@ -353,7 +498,7 @@ globalThis["sqlite3-wasm-go"] = { protocolVersion: 1, createWorker(): Worker }
 The key is defined as one exported constant on both sides (`src/global.ts`,
 `binding/global.go`) — it is currently spelled three different ways across the repo.
 
-### 4.11 Capability ladder, never a silent substitution
+### 4.15 Capability ladder, never a silent substitution
 
 `READY` reports `{protocolVersion, sqliteVersion, crossOriginIsolated, hasSAB,
 bigIntEnabled, canInstallProgressHandler, vfs:{opfs, opfs-sahpool, memdb}}`.
@@ -371,7 +516,7 @@ bigIntEnabled, canInstallProgressHandler, vfs:{opfs, opfs-sahpool, memdb}}`.
 `bind_int64`, `changes64` and `last_insert_rowid` all throw `fI64Disabled`
 (`sqlite3.mjs:9012-9016`) — the entire foundation of the wire format.
 
-### 4.12 Lifecycle
+### 4.16 Lifecycle
 
 - `Connector` implements `io.Closer` (honoured by `DB.Close`, `driver.go:120-121`):
   send `CLOSE`, await the ack, then `worker.terminate()`.
@@ -387,7 +532,7 @@ bigIntEnabled, canInstallProgressHandler, vfs:{opfs, opfs-sahpool, memdb}}`.
 - The blob object URL is created once, cached module-scoped, and revoked only at
   registry teardown.
 
-### 4.13 Sharing the compiled wasm module
+### 4.17 Sharing the compiled wasm module
 
 `sqlite3.wasm` is 856 KB, and because it is delivered as a `data:` URI inside a blob
 worker the browser's wasm code cache cannot be reused across workers. Each DB worker
