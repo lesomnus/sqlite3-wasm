@@ -12,7 +12,7 @@ Design rationale: [DESIGN.md](./DESIGN.md) · Wire format: [PROTOCOL.md](./PROTO
 | --- | --- | --- |
 | 0 | Design documents | ✅ done |
 | 1 | Wire codec + golden vectors | ✅ done |
-| 2 | DSN parser + type mapping | ⬜ not started |
+| 2 | DSN parser + type mapping | ✅ done |
 | 3 | DB worker | ⬜ not started |
 | 4 | Packaging | ⬜ not started |
 | 5 | Go transport | ⬜ not started |
@@ -57,15 +57,16 @@ Exit: **met** — all three implementations agree on all 40 vectors.
 Also build-tag-free and host-testable — the bulk of the semantics with none of the
 browser.
 
-- [ ] `driver/dsn.go` — parse, validate, reject `cache=`/`_busy_timeout`, rewrite
+- [x] `driver/dsn.go` — parse, validate, reject `cache=`/`_busy_timeout`, rewrite
       `:memory:` → `file:/<id>?vfs=memdb`.
-- [ ] `driver/decltype.go` — normalisation, `timeClass`/`boolClass`, scan types.
-- [ ] `driver/timefmt.go` — layout list, `Z` handling, `ParseInLocation`, write formats.
-- [ ] `driver/convert.go` — `(tag, declType) → driver.Value` and the reverse.
-- [ ] Host tests including the parse matrix from
+- [x] `driver/decltype.go` — normalisation, `timeClass`/`boolClass`, scan types.
+- [x] `driver/timefmt.go` — layout list, `Z` handling, `ParseInLocation`, write formats.
+- [x] `driver/convert.go` — `(tag, declType) → driver.Value` and the reverse, decoding
+      straight out of the batch buffer.
+- [x] Host tests including the parse matrix from
       [PROTOCOL.md §9](./PROTOCOL.md#9-type-mapping) and both incumbents' edge cases.
 
-Exit: `GOOS=linux go test ./...` covers DSN, decltype, time and conversion.
+Exit: **met** — `go test ./...` covers DSN, decltype, time and conversion with no browser.
 
 ## Phase 3 — DB worker
 
@@ -195,6 +196,31 @@ Exit: `npm test` and `go test ./...` both green; README describes what actually 
 ---
 
 ## Changelog
+
+### Phase 2 — DSN, declared types, time and conversion
+
+All build-tag-free, so `go test ./...` covers the bulk of the driver's semantics
+without a browser.
+
+Two round-trip bugs the tests caught, both worth recording:
+
+- **`_time_format=utc` was not self-describing.** It wrote a naive
+  `2006-01-02 15:04:05.999999999`, but a naive value is parsed back in the
+  *reader's* location — so writing UTC and reading with `_loc=Asia/Seoul` shifted
+  by nine hours. It now writes a literal trailing `Z`. Checked against SQLite
+  3.50.4 first: `datetime('2024-01-02 15:04:05.123Z')` is accepted, so the value
+  stays usable from SQL, and it still sorts lexicographically across zones.
+- **The offset format cannot represent sub-minute zone offsets.** Go's `-07:00`
+  layout carries whole minutes, so an LMT-era instant in `Asia/Seoul` (offset
+  `+08:27:52`) does not round-trip. mattn/go-sqlite3 has the same limitation.
+  `TimeFormatOffset` stays the default anyway — it is byte-for-byte what mattn
+  writes, so a database file shared between a Go server and a browser reads the
+  same either way — and the limitation is documented with a test that fails if it
+  is ever silently fixed.
+
+`BOOL` is deliberately *not* in the bool class and `TIME` is deliberately *not* in
+the time class, both for mattn parity; `!= 0` rather than mattn's `> 0` decides a
+BOOLEAN, since `> 0` reads -1 as false.
 
 ### Phase 1 — wire codec
 
