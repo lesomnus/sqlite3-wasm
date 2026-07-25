@@ -418,8 +418,7 @@ Vite build, esbuild and rollup:
 | consumer constructs the Worker | violates the requirement |
 | **fully inlined blob module worker** | **works everywhere it was tested** |
 
-So the shipped shape is a ~200-byte entry that lazily `import()`s a single
-fully-inlined worker module — sqlite3 JS, `sqlite3.wasm` as a single-argument
+So the shipped shape is an entry that carries a single fully-inlined worker module — sqlite3 JS, `sqlite3.wasm` as a single-argument
 `data:application/wasm;base64` URI, and the OPFS async proxy as a nested blob — and
 spawns it with `new Worker(URL.createObjectURL(blob), {type:'module'})`.
 

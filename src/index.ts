@@ -10,6 +10,10 @@
 
 import { type CreateWorkerOptions, GLOBAL_KEY, type Sqlite3WasmGo } from './global'
 import { PROTOCOL_VERSION } from './wire'
+// Inlined, not URL-based: a Vite library build of a URL worker emits a chunk
+// that references sibling assets a downstream bundler does not copy, and the
+// only symptom is OPFS quietly disappearing. See docs/DESIGN.md §4.12.
+import DbWorker from './worker/index?worker&inline'
 
 /**
  * Live workers, so they can be torn down together.
@@ -34,14 +38,7 @@ function createWorker(options: CreateWorkerOptions = {}): Worker {
 		)
 	}
 
-	// TODO(phase 4b): replace with the inlined blob worker. A URL-based worker
-	// resolves correctly under Vite dev and test, but a Vite library build emits
-	// a chunk that references sibling assets a downstream bundler will not copy,
-	// which silently costs OPFS. See docs/DESIGN.md §4.12.
-	const worker = new Worker(new URL('./worker/index.ts', import.meta.url), {
-		type: 'module',
-		name: 'sqlite3-wasm-go',
-	})
+	const worker = new DbWorker({ name: 'sqlite3-wasm-go' })
 
 	if (options.wasmUrl) {
 		// Reserved for the inlined build, where the worker cannot resolve a

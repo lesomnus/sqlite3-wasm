@@ -14,10 +14,10 @@ Design rationale: [DESIGN.md](./DESIGN.md) · Wire format: [PROTOCOL.md](./PROTO
 | 1 | Wire codec + golden vectors | ✅ done |
 | 2 | DSN parser + type mapping | ✅ done |
 | 3 | DB worker | ✅ done |
-| 4 | Packaging | 🟡 global contract done, inlined bundle pending |
+| 4 | Packaging | ✅ done |
 | 5 | Go transport | ✅ done |
 | 6 | database/sql driver | ✅ done |
-| 7 | Tests, examples, README | ⬜ not started |
+| 7 | Tests, examples, README | 🟡 mostly done, see below |
 
 Everything under `binding/` and `driver/` may be broken freely: the repository has
 no tags, so the only load-bearing public contract is the import path
@@ -100,23 +100,32 @@ Exit: **met** — 43 protocol-level tests pass in Chromium.
       mirrored by `binding/worker.go`.
 - [x] `src/index.ts` — installs `{protocolVersion, createWorker}`, keeps a worker
       registry, tears down on `pagehide` and `import.meta.hot.dispose`, guards SSR.
-- [ ] Lazy `import()` of the **inlined** worker, and the per-path worker reuse map
-      (pending, with the bundle work below).
+- [x] The worker is inlined into the entry (`?worker&inline`).
+- [ ] Lazy `import()` so the 1.6 MB stays off the critical path until the first
+      `createWorker`, and the per-path worker reuse map.
 - [ ] `src/go-worker.ts` — `createGoRuntimeWorker(goWasmUrl, opts)` with vendored,
-      pinned `wasm_exec.js`.
-- [ ] `scripts/vite-plugin-inline-sqlite3.ts` — resolve `@sqlite.org/sqlite-wasm` to
-      `sqlite3-bundler-friendly.mjs`, inline the wasm as a `data:` URI, string-patch
-      the OPFS proxy into a nested blob, `this.error()` if the needle is missing.
-- [ ] Reject Vite's `data:` worker fallback — a `data:` worker is not cross-origin
-      isolated.
-- [ ] `wasm_exec.js` drift check against `$(go env GOROOT)/lib/wasm/wasm_exec.js`.
-- [ ] `package.json`: rename to `sqlite3-wasm-go`, drop `private`, add `files`,
-      `sideEffects`, `types` first in every exports condition; move
-      `@sqlite.org/sqlite-wasm` to devDependencies and pin it exactly.
-- [ ] Downstream smoke test: build the package, consume it from a scratch Vite app,
-      assert an OPFS round trip.
+      pinned `wasm_exec.js`. Until it ships, the consumer still writes the ~10-line
+      Go-worker entry the README shows.
+- [x] `scripts/vite-plugin-sqlite3-inline.ts` — resolves `@sqlite.org/sqlite-wasm`
+      to `sqlite3-bundler-friendly.mjs`, string-patches the OPFS proxy into a nested
+      blob, and `this.error()`s if the needle is missing. The wasm is inlined as a
+      `data:` URI by Vite's lib mode.
+- [x] Vite's `data:` worker fallback now throws — a `data:` worker is not
+      cross-origin isolated, so it would silently lose OPFS and cancellation.
+- [ ] `wasm_exec.js` drift check against `$(go env GOROOT)/lib/wasm/wasm_exec.js`
+      (ships with `src/go-worker.ts`).
+- [x] `package.json`: renamed to `sqlite3-wasm-go`, `private` dropped, `files` and
+      `sideEffects` added, `types` first in every exports condition,
+      `@sqlite.org/sqlite-wasm` moved to devDependencies and pinned exactly.
+- [x] The built bundle is tested directly: `src/dist.node.test.ts` asserts its shape
+      and `src/dist.test.ts` runs it, including an **OPFS database that persists
+      across two workers**.
+- [ ] A true downstream consumer app (installed into node_modules, built by its own
+      Vite/webpack) rather than importing `dist/` in place.
 
-Exit: a consumer app writes zero JS glue and gets a working OPFS database.
+Exit: **partly met** — the bundle is one self-contained file with a working OPFS
+database, verified against the built artifact. The consumer still hand-writes the
+Go-worker entry until `src/go-worker.ts` ships.
 
 ## Phase 5 — Go transport
 
@@ -162,13 +171,14 @@ transactions, int64 extremes and the error model.
 
 ## Phase 7 — Tests, examples, README
 
-- [ ] Replace `internal/assert` with a runner emitting `{name, ok, msg, file:line}`
-      so a failed assertion is diagnosable (today it panics with `[]`).
+- [x] `internal/assert` now reports the caller's file and line and the actual
+      values; it used to panic with an empty `[]string` and no location.
 - [ ] One `conformance` Go binary with subtests selected by `postMessage`, instead of
       one wasm blob per scenario.
-- [ ] `src/examples.test.ts`: `onerror`, `onmessageerror`, a per-test timeout,
-      `terminate()` in a `finally`, unique OPFS filenames, `afterEach` cleanup.
-- [ ] Wire `scripts/build-examples.mts` into an npm `pretest` so stale wasm cannot run.
+- [x] `src/examples.test.ts`: `onerror`, `onmessageerror`, a per-test timeout and
+      `terminate()` in a `finally`.
+- [x] `scripts/build-examples.mts` runs from an npm `pretest`, along with the
+      bundle build, so neither stale wasm nor a stale `dist/` can be tested.
 - [ ] Coverage: storage-class fidelity (`int64` past 2^53, `-0.0`, `1e300`, NaN/±Inf,
       empty blob, TEXT with NUL and non-BMP runes); decltype time round trip;
       `sql.Named`; `LastInsertId`/`RowsAffected` for INSERT/UPDATE/DELETE;
@@ -177,10 +187,10 @@ transactions, int64 extremes and the error model.
       file producing a fast explicit error; pooled memory DSN sharing one database.
 - [ ] OPFS tier gated on `crossOriginIsolated`; add `firefox` and `webkit` vitest
       instances with at least a smoke tier.
-- [ ] README rewrite: new global contract, `go-worker` entry, DSN table,
-      `SetMaxOpenConns(1)`, COOP/COEP **and** CSP (`worker-src blob:`,
-      `script-src 'wasm-unsafe-eval'`), WAL unavailability, browser floor,
-      Next.js recipe alongside Vite. Keep the ncruces attribution and add mattn.
+- [x] README rewritten: architecture, new import contract, DSN table, type rules and
+      their divergences, error model, concurrency, cancellation, COOP/COEP **and**
+      CSP, browser floor, Vite and Next.js. ncruces attribution kept, mattn and
+      modernc added.
 
 Exit: `npm test` and `go test ./...` both green; README describes what actually ships.
 

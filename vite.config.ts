@@ -1,25 +1,29 @@
 import { defineConfig } from 'vitest/config'
 import { playwright } from '@vitest/browser-playwright'
 import dts from 'vite-plugin-dts'
+import { sqlite3Inline } from './scripts/vite-plugin-sqlite3-inline'
 import path from 'path'
 
 export default defineConfig({
+  // The default worker format is 'iife', which cannot carry a top-level await;
+  // dev always uses module workers, so without this the DB worker would work in
+  // development and break in a production build.
+  worker: {
+    format: 'es',
+    plugins: () => [sqlite3Inline()],
+  },
   build: {
     lib: {
       entry: path.resolve(__dirname, 'src/index.ts'),
 			formats: ["es"],
 			fileName: (format, entryName) => `${entryName}.${format}.js`,
     },
-    rollupOptions: {
-      external: [
-        '@sqlite.org/sqlite-wasm'
-      ],
-    },
     sourcemap: true,
     target: 'esnext',
     minify: false,
   },
   plugins: [
+    sqlite3Inline(),
     dts({
 			tsconfigPath: "./tsconfig.build.json",
       insertTypesEntry: true,

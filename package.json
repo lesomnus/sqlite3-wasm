@@ -1,24 +1,33 @@
 {
-  "name": "sqlite3-wasm",
+  "name": "sqlite3-wasm-go",
   "version": "0.0.1",
+  "description": "Run SQLite in a Web Worker for Go programs compiled to WebAssembly",
+  "license": "MIT",
   "type": "module",
-  "private": true,
-  "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview",
-    "test:browser": "vitest run --project browser",
-    "test": "vitest run",
-    "test:node": "vitest run --project node",
-    "gen:wire": "python3 scripts/gen-wire-vectors.py"
-  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": [
+    "./dist/index.es.js"
+  ],
   "exports": {
     ".": {
-      "import": "./dist/index.es.js",
-      "types": "./dist/index.d.ts"
-    }
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.es.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsc --noEmit && vite build",
+    "build:examples": "tsx scripts/build-examples.mts",
+    "gen:wire": "python3 scripts/gen-wire-vectors.py",
+    "pretest": "npm run build:examples && npm run build",
+    "test": "vitest run",
+    "test:node": "vitest run --project node",
+    "test:browser": "vitest run --project browser"
   },
   "devDependencies": {
+    "@sqlite.org/sqlite-wasm": "3.50.4-build1",
     "@types/node": "^24.10.0",
     "@vitest/browser-playwright": "^4.0.7",
     "tsx": "^4.20.6",
@@ -27,8 +36,5 @@
     "vite-plugin-dts": "^4.5.4",
     "vitest": "^4.0.7",
     "zx": "^8.8.5"
-  },
-  "dependencies": {
-    "@sqlite.org/sqlite-wasm": "^3.50.4-build1"
   }
 }
