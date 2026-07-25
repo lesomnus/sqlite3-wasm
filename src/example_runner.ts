@@ -1,4 +1,4 @@
-import './init'
+import './index'
 import "./wasm_exec";
 
 console.log = (message: string) => {

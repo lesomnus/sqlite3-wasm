@@ -9,78 +9,81 @@ import (
 	"github.com/lesomnus/sqlite3-wasm/binding"
 )
 
-// Stmt is a thin client-side prepared statement shim. The underlying
-// sqlite wasm worker Promiser does not offer a prepare/statement handle
-// in the Worker API used here, so we store the SQL text and simply send
-// it to the worker on Exec/Query. This sacrifices performance and true
-// parameter binding but provides basic functionality while the worker
-// API is limited.
+// Stmt is a statement compiled on the worker.
 type Stmt struct {
-	c Conn
-	q string
+	c     *Conn
+	s     *binding.Statement
+	query string
 }
 
 var (
-	_ driver.Stmt             = &Stmt{}
-	_ driver.StmtExecContext  = &Stmt{}
-	_ driver.StmtQueryContext = &Stmt{}
+	_ driver.Stmt             = (*Stmt)(nil)
+	_ driver.StmtExecContext  = (*Stmt)(nil)
+	_ driver.StmtQueryContext = (*Stmt)(nil)
 )
 
-func (s Stmt) Close() error {
-	return nil
+func (s *Stmt) Close() error {
+	return s.c.db.Finalize(context.Background(), s.s.ID)
 }
 
-// NumInput returns -1 because we don't parse or bind placeholders here.
-func (s Stmt) NumInput() int { return -1 }
+// NumInput reports the parameter count only when SQLite's answer can be trusted.
+//
+// sqlite3_bind_parameter_count returns the largest index used, so `SELECT ?5`
+// reports 5 for a single parameter — and database/sql turns a wrong count into
+// "sql: expected N arguments, got M" before the driver is ever called. The
+// worker therefore only marks the count exact when every slot is an anonymous
+// '?' and nothing follows the statement; otherwise this returns -1 and the
+// arity is checked by SQLite itself, which can say something accurate.
+func (s *Stmt) NumInput() int {
+	if !s.s.ParamCountExact {
+		return -1
+	}
+	return int(s.s.ParamCount)
+}
 
-func (s Stmt) Exec(args []driver.Value) (driver.Result, error) {
+func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	return s.ExecContext(context.Background(), namedValues(args))
 }
 
-func (s Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
-	return s.c.ExecContext(ctx, s.q, args)
-}
-
-func (s Stmt) Query(args []driver.Value) (driver.Rows, error) {
-	return s.QueryContext(context.Background(), namedValues(args))
-}
-
-func (s Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
-	// Perform simple client-side parameter substitution and send SQL to worker.
-	final, err := substituteParams(s.q, args)
+func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
+	w, err := argsWriter(s.c.cfg, args)
 	if err != nil {
 		return nil, err
 	}
-	ch := s.c.p.Exec(ctx, final)
-
-	// Read the first RowResult to initialize columns / first row.
-	var first binding.RowResult
-	select {
-	case rr, ok := <-ch:
-		if !ok {
-			return &Rows{cols: nil, ch: ch, closed: true}, nil
-		} else {
-			first = rr
+	// Safe to retry: a prepared statement is a single statement, and
+	// SQLITE_BUSY means it did not run.
+	return retry(ctx, func() (driver.Result, error) {
+		res, err := s.c.db.ExecStatement(ctx, s.s.ID, w)
+		if err != nil {
+			return nil, s.c.classify(ctx, err)
 		}
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+		return newResult(res), nil
+	})
+}
 
-	if first.Error != nil {
-		return nil, first.Error
-	}
+func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
+	return s.QueryContext(context.Background(), namedValues(args))
+}
 
-	r := &Rows{ch: ch}
-	if len(first.ColumnNames) > 0 {
-		r.cols = first.ColumnNames
+func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
+	w, err := argsWriter(s.c.cfg, args)
+	if err != nil {
+		return nil, err
 	}
+	return retry(ctx, func() (driver.Rows, error) {
+		rows, err := s.c.db.QueryStatement(ctx, s.s.ID, w)
+		if err != nil {
+			return nil, s.c.classify(ctx, err)
+		}
+		return newRows(ctx, s.c, rows), nil
+	})
+}
 
-	if first.RowNumber == 0 {
-		// No rows; return rows object which will immediately EOF on Next.
-		r.closed = true
-		return r, nil
+// namedValues adapts the deprecated positional entry points.
+func namedValues(args []driver.Value) []driver.NamedValue {
+	named := make([]driver.NamedValue, len(args))
+	for i, v := range args {
+		named[i] = driver.NamedValue{Ordinal: i + 1, Value: v}
 	}
-
-	r.cur = first.Row
-	return r, nil
+	return named
 }

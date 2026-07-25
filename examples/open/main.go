@@ -12,17 +12,16 @@ import (
 )
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	p, err := binding.NewPromiser(ctx)
+	w, err := binding.Spawn(ctx)
+	assert.NoErr(err)
+	defer w.Close()
+
+	db, err := w.Open(ctx, "file:/example-open?vfs=memdb", "memdb", 0)
 	assert.NoErr(err)
 
-	res, err := p.Open("file::memory:")
-	assert.NoErr(err)
-
-	fmt.Printf("res: %v\n", res)
-
-	err = p.Close()
-	assert.NoErr(err)
+	fmt.Println("opened; cancellable:", db.Cancellable())
+	assert.NoErr(db.Close(ctx))
 }

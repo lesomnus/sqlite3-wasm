@@ -14,9 +14,9 @@ Design rationale: [DESIGN.md](./DESIGN.md) · Wire format: [PROTOCOL.md](./PROTO
 | 1 | Wire codec + golden vectors | ✅ done |
 | 2 | DSN parser + type mapping | ✅ done |
 | 3 | DB worker | ✅ done |
-| 4 | Packaging | ⬜ not started |
-| 5 | Go transport | ⬜ not started |
-| 6 | database/sql driver | ⬜ not started |
+| 4 | Packaging | 🟡 global contract done, inlined bundle pending |
+| 5 | Go transport | ✅ done |
+| 6 | database/sql driver | ✅ done |
 | 7 | Tests, examples, README | ⬜ not started |
 
 Everything under `binding/` and `driver/` may be broken freely: the repository has
@@ -96,10 +96,12 @@ Exit: **met** — 43 protocol-level tests pass in Chromium.
 
 ## Phase 4 — Packaging
 
-- [ ] `src/global.ts` — the global key and `protocolVersion` as exported constants.
-- [ ] `src/index.ts` — installs `{protocolVersion, createWorker}`; lazy `import()`
-      of the inlined worker; worker registry; `pagehide` and `import.meta.hot.dispose`
-      teardown; per-path worker reuse map; SSR guard.
+- [x] `src/global.ts` — the global key and `protocolVersion` as exported constants,
+      mirrored by `binding/worker.go`.
+- [x] `src/index.ts` — installs `{protocolVersion, createWorker}`, keeps a worker
+      registry, tears down on `pagehide` and `import.meta.hot.dispose`, guards SSR.
+- [ ] Lazy `import()` of the **inlined** worker, and the per-path worker reuse map
+      (pending, with the bundle work below).
 - [ ] `src/go-worker.ts` — `createGoRuntimeWorker(goWasmUrl, opts)` with vendored,
       pinned `wasm_exec.js`.
 - [ ] `scripts/vite-plugin-inline-sqlite3.ts` — resolve `@sqlite.org/sqlite-wasm` to
@@ -118,43 +120,45 @@ Exit: a consumer app writes zero JS glue and gets a working OPFS database.
 
 ## Phase 5 — Go transport
 
-- [ ] `binding/global.go` — read the global once, synchronously; typed errors for
-      absent / version-mismatched / retired-key cases.
-- [ ] `binding/worker.go` — spawn, `onmessage`/`onerror`/`onmessageerror` as
+- [x] `binding.Lookup` — reads the global once, synchronously; typed errors for the
+      absent, version-mismatched and retired-key cases.
+- [x] `binding/worker.go` — spawn, `onmessage`/`onerror`/`onmessageerror` as
       `js.Func`s with `Release()` on close, handshake with its own timeout.
-- [ ] `binding/conn.go` — request correlation, **mutex-guarded queue + cap-1 wake
+- [x] `binding/db.go` — request correlation, **mutex-guarded queue + cap-1 wake
       channel** hand-off (never a blocking send from a `js.Func`), `defer recover()`
-      in every callback, credit granting from the consumer, abort, late-frame discard.
-- [ ] `binding/cancel.go` — `Int32Array` over the `SharedArrayBuffer`, generation
-      word, watcher goroutine torn down with `defer`.
+      in the message callback, credit granted by the consumer, fire-and-forget abort,
+      late-frame discard.
+- [x] `Int32Array` over the `SharedArrayBuffer`, generation word, watcher goroutine
+      always torn down.
 
-Exit: a Go program can open, query, and cancel through the worker.
+Exit: **met** — the `examples/` programs do exactly that in Chromium.
 
 ## Phase 6 — database/sql driver
 
-- [ ] `Driver` + `DriverContext`; `OpenConnector` memoised by DSN so
+- [x] `Driver` + `DriverContext`; `OpenConnector` memoised by DSN so
       `Driver.Open` cannot mint a second worker.
-- [ ] `Connector` as a pointer type, worker created under `sync.Once` with the error
+- [x] `Connector` as a pointer type, worker created under `sync.Once` with the error
       memoised; implements `io.Closer`.
-- [ ] `Conn`: `Pinger`, `ExecerContext`, `QueryerContext`, `ConnPrepareContext`,
+- [x] `Conn`: `Pinger`, `ExecerContext`, `QueryerContext`, `ConnPrepareContext`,
       `ConnBeginTx`, `SessionResetter`, `Validator`, `NamedValueChecker`.
-- [ ] `Stmt`: `StmtExecContext`, `StmtQueryContext`, `NumInput` per
+- [x] `Stmt`: `StmtExecContext`, `StmtQueryContext`, `NumInput` per
       [PROTOCOL.md §4.5](./PROTOCOL.md#45-prepared).
-- [ ] `Rows`: `RowsColumnTypeDatabaseTypeName`, `RowsColumnTypeScanType`; bare
+- [x] `Rows`: `RowsColumnTypeDatabaseTypeName`, `RowsColumnTypeScanType`; bare
       `io.EOF`; non-blocking `Close`; ctx polled in `Next`; **decode one row at a
       time straight into the `dest []driver.Value` slice** — never materialise a
       `[][]driver.Value` (95 % of Go-side cost is interface boxing).
-- [ ] `Tx`: `BEGIN IMMEDIATE` by default, reject non-default isolation, map `ReadOnly`.
-- [ ] Error model: `*sqlitewasm.Error` with rc / extended rc / message / offset,
+- [x] `Tx`: `BEGIN IMMEDIATE` by default, reject non-default isolation, map `ReadOnly`.
+- [x] Error model: `*sqlitewasm.Error` with rc / extended rc / message / offset,
       `Is` support, `ErrBusy` / `ErrConstraint`; Go-side `SQLITE_BUSY` retry;
       never `driver.ErrBadConn` from an operation that may have executed.
-- [ ] `ResetSession`: reconcile zombie statements, zero the cancel word, `ROLLBACK`
+- [x] `ResetSession`: reconcile zombie statements, zero the cancel word, `ROLLBACK`
       when `sqlite3_get_autocommit` is 0, `ErrBadConn` when the worker is dead.
-- [ ] `sqlitewasm.OpenDB`, `sqlitewasm.Time` / `NullTime`, non-js build stub.
-- [ ] Delete `substituteParams`, `escapeValue`, `convertToDriverValue`, `isInteger`,
+- [x] `sqlitewasm.OpenDB`, `sqlitewasm.Time` / `NullTime`, non-js build stub.
+- [x] Delete `substituteParams`, `escapeValue`, `convertToDriverValue`, `isInteger`,
       `CloseResult`; wire up `notWhitespace` for prepare-tail checks.
 
-Exit: the existing `examples/driver` passes, plus transactions and cancellation.
+Exit: **met** — `examples/driver` covers types, ColumnTypes, named parameters,
+transactions, int64 extremes and the error model.
 
 ## Phase 7 — Tests, examples, README
 

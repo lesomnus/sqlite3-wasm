@@ -12,14 +12,20 @@ import (
 )
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	p, err := binding.NewPromiser(ctx)
+	w, err := binding.Spawn(ctx)
 	assert.NoErr(err)
+	defer w.Close()
 
-	v, err := p.GetConfig()
-	assert.NoErr(err)
+	info := w.Info()
+	fmt.Printf("sqlite %s, protocol v%d, vfs %v\n", info.SQLiteVersion, info.ProtocolVersion, info.VFSList)
 
-	fmt.Printf("v: %v\n", v)
+	assert.True(info.SQLiteVersion != "", "sqlite version")
+	assert.Eq(int(info.ProtocolVersion), 1, "protocol version")
+	// 64-bit accessors underpin the whole wire format, so the worker refuses to
+	// start without them.
+	assert.True(info.Capabilities.BigInt(), "BigInt support")
+	assert.True(info.HasVFS("memdb"), "memdb VFS")
 }

@@ -131,3 +131,16 @@ func integerFromTime(t time.Time, f IntegerTimeFormat) int64 {
 		return t.Unix()
 	}
 }
+
+// ParseTime parses a TEXT timestamp with the driver's layouts, reporting
+// whether any of them matched. It is exported for sqlitewasm.Time, which lets a
+// caller opt in to time conversion for a column that has no declared type.
+func ParseTime(s string, loc *time.Location) (time.Time, bool) {
+	return parseTimeString(s, loc)
+}
+
+// TimeFromUnix converts an integer timestamp using the same heuristic the
+// driver applies to a DATE, DATETIME or TIMESTAMP column.
+func TimeFromUnix(v int64, loc *time.Location) time.Time {
+	return timeFromInteger(v, IntegerTimeNone, loc)
+}

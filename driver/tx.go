@@ -5,30 +5,29 @@ package driver
 import (
 	"context"
 	"database/sql/driver"
-	"time"
 )
 
+// Tx is an explicit transaction.
 type Tx struct {
-	c Conn
+	c        *Conn
+	readOnly bool
 }
 
-var _ driver.Tx = Tx{}
+var _ driver.Tx = (*Tx)(nil)
 
-func (x Tx) Commit() error {
-	// Send COMMIT to the worker. Use a short timeout to avoid blocking
-	// indefinitely if the promiser is unresponsive.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+func (t *Tx) Commit() error   { return t.finish("COMMIT") }
+func (t *Tx) Rollback() error { return t.finish("ROLLBACK") }
 
-	_, err := x.c.ExecContext(ctx, "COMMIT", nil)
-	return err
-}
-
-func (x Tx) Rollback() error {
-	// Send ROLLBACK to the worker.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err := x.c.ExecContext(ctx, "ROLLBACK", nil)
+func (t *Tx) finish(stmt string) error {
+	// database/sql may call this from its context watcher, so the statement
+	// must not inherit a context that is already cancelled.
+	ctx := context.Background()
+	_, err := t.c.db.Exec(ctx, stmt, nil)
+	t.c.inTx = false
+	if t.readOnly {
+		if _, e := t.c.db.Exec(ctx, "PRAGMA query_only = OFF", nil); err == nil {
+			err = e
+		}
+	}
 	return err
 }

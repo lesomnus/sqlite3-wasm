@@ -3,154 +3,105 @@
 package driver
 
 import (
+	"context"
 	"database/sql/driver"
-	"fmt"
+	"errors"
 	"io"
-	"math"
-	"strings"
-	"time"
+	"reflect"
 
 	"github.com/lesomnus/sqlite3-wasm/binding"
 )
 
-// Rows implements driver.Rows by reading binding.RowResult values from a
-// channel produced by binding.Promiser.Exec.
+// Rows streams a result set.
 type Rows struct {
-	cols   []string
-	ch     <-chan binding.RowResult
-	cur    []any
-	closed bool
+	ctx  context.Context
+	c    *Conn
+	rows *binding.Rows
+
+	names     []string
+	declTypes []string
+	classes   []declClass
 }
 
-var _ driver.Rows = &Rows{}
+var (
+	_ driver.Rows                           = (*Rows)(nil)
+	_ driver.RowsColumnTypeDatabaseTypeName = (*Rows)(nil)
+	_ driver.RowsColumnTypeScanType         = (*Rows)(nil)
+)
 
-func (r *Rows) Columns() []string { return r.cols }
+// RowsColumnTypeNullable is deliberately not implemented. Returning ok=false is
+// byte-for-byte identical to omitting the method, so it would be dead code —
+// and the reason it cannot be supported is not that
+// sqlite3_table_column_metadata is missing (it is present and works) but that
+// sqlite3_column_origin_name, _table_name and _database_name are absent from
+// this wasm build, so a result column cannot be traced back to a base table.
 
-func (r *Rows) Close() error {
-	if r.closed {
-		return nil
+func newRows(ctx context.Context, c *Conn, rows *binding.Rows) *Rows {
+	cols := rows.Columns()
+	r := &Rows{
+		ctx:       ctx,
+		c:         c,
+		rows:      rows,
+		names:     make([]string, len(cols)),
+		declTypes: make([]string, len(cols)),
+		classes:   make([]declClass, len(cols)),
 	}
-	// drain channel to allow promiser callbacks to finish
-	for rr := range r.ch {
-		if rr.RowNumber == 0 {
-			break
-		}
+	for i, col := range cols {
+		r.names[i] = col.Name
+		// Normalised once, here, and used for both value conversion and
+		// ColumnTypeScanType.
+		r.declTypes[i] = normalizeDeclType(col.DeclType)
+		r.classes[i] = classifyDeclType(r.declTypes[i])
 	}
-	r.closed = true
-	return nil
+	return r
 }
 
+func (r *Rows) Columns() []string { return r.names }
+
+// ColumnTypeDatabaseTypeName returns the declared type, upper case and without
+// any length, as database/sql documents. It is empty for an expression column.
+func (r *Rows) ColumnTypeDatabaseTypeName(i int) string { return r.declTypes[i] }
+
+// ColumnTypeScanType is derived from the declared type alone, never from a
+// value: ColumnTypes may be called before the first Next, when every column
+// still looks like NULL.
+func (r *Rows) ColumnTypeScanType(i int) reflect.Type {
+	return scanTypeForDeclType(r.declTypes[i])
+}
+
+// Next decodes one row directly into dest.
+//
+// Nothing is materialised ahead of it: the batch stays a byte slice and each
+// cell is boxed once, straight into the slice database/sql reuses across calls.
 func (r *Rows) Next(dest []driver.Value) error {
-	if r.closed {
-		return io.EOF
+	if err := r.ctx.Err(); err != nil {
+		return err
 	}
 
-	if r.cur == nil {
-		rr, ok := <-r.ch
-		if !ok {
-			r.closed = true
-			return io.EOF
-		}
-		if rr.Error != nil {
-			r.closed = true
-			return rr.Error
-		}
-		if rr.RowNumber == 0 {
-			r.closed = true
-			return io.EOF
-		}
-		// populate columns if not already set
-		if r.cols == nil && len(rr.ColumnNames) > 0 {
-			r.cols = rr.ColumnNames
-		}
-		r.cur = rr.Row
-	}
-
-	if len(dest) < len(r.cur) {
-		return fmt.Errorf("destination len %d < row len %d", len(dest), len(r.cur))
-	}
-
-	for i := range r.cur {
-		dest[i] = convertToDriverValue(r.cols[i], r.cur[i])
-	}
-	// clear current row so next call reads the following one
-	r.cur = nil
-	return nil
-}
-
-func convertToDriverValue(col string, v any) driver.Value {
-	if strings.HasPrefix(col, "date_") || strings.HasSuffix(col, "_at") {
-		if t, ok := v.(string); ok {
-			// if idx := strings.Index(t, " m="); idx != -1 {
-			// 	t = t[:idx]
-			// }
-
-			// Try to parse as time.
-			// TODO: I think this implementation is not safe.
-			layouts := []string{
-				// time.RFC3339Nano,
-				// time.RFC3339,
-				"2006-01-02 15:04:05.999999999 -0700 MST",
-			}
-			for _, layout := range layouts {
-				if parsed, err := time.Parse(layout, t); err == nil {
-					return parsed
+	rd, err := r.rows.Next(r.ctx)
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			if r.rows.Aborted() {
+				if ctxErr := r.ctx.Err(); ctxErr != nil {
+					return ctxErr
 				}
 			}
+			// Bare io.EOF: database/sql compares it with != rather than
+			// errors.Is, so a wrapped one would surface as a driver error.
+			return io.EOF
 		}
-		return nil
+		return r.c.classify(r.ctx, err)
 	}
 
-	switch t := v.(type) {
-	case nil:
-		return nil
-	case int:
-		return int64(t)
-	case int8:
-		return int64(t)
-	case int16:
-		return int64(t)
-	case int32:
-		return int64(t)
-	case int64:
-		return t
-	case uint:
-		return int64(t)
-	case uint8:
-		return int64(t)
-	case uint16:
-		return int64(t)
-	case uint32:
-		return int64(t)
-	case uint64:
-		return int64(t)
-
-		// All numbers from JS are float64, but some numbers are integers in the DB.
-		// Meanwhile, booleans are stored as integers in the DB, and sql.Row.Scanner
-		// does not scan floats as booleans, only integers.
-		// Thankfully, sql.Row.Scanner converts integers to floats if needed.
-		// Therefore, I decided to convert the result to an integer whenever possible.
-	case float32:
-		if isInteger(float64(t)) {
-			return int64(t)
+	for i := range r.classes {
+		v := decodeValue(rd, r.classes[i], r.c.cfg)
+		if i < len(dest) {
+			dest[i] = v
 		}
-		return float64(t)
-	case float64:
-		if isInteger(t) {
-			return int64(t)
-		}
-		return t
-	case bool:
-		return t
-	case string:
-		return t
-	case []byte:
-		return t
-	default:
-		return fmt.Sprintf("%v", t)
 	}
+	return rd.Err()
 }
 
-func isInteger(f float64) bool {
-	return f == math.Trunc(f)
-}
+// Close ends the stream. It never blocks: database/sql calls it from the
+// context watcher while holding the connection mutex.
+func (r *Rows) Close() error { return r.rows.Close() }
