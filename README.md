@@ -177,7 +177,9 @@ It requires cross-origin isolation (for `SharedArrayBuffer`) and a CSP that perm
 
 ## Browser requirements
 
-The floor is roughly **Chrome 80 / Firefox 114 / Safari 16.4**: nested module workers, and OPFS sync access handles for persistence.
+The floor is the maximum over the features actually required, and OPFS sync access handles set it: roughly **Chrome 102 / Firefox 111 / Safari 17**.
+
+Without persistence — a transient or `memdb` database — what remains is module workers, nested workers and top-level await: roughly **Chrome 89 / Firefox 114 / Safari 15**.
 
 The test suite runs on Chromium, Firefox and WebKit. All three run the driver, the wire protocol, cancellation and the packaged bundle; Chromium and Firefox additionally round-trip a real OPFS database across workers. Playwright's Linux WebKit build has no OPFS at all — no `navigator.storage.getDirectory`, no `FileSystemFileHandle` — so those tiers are skipped there. That is a property of that build and says nothing about Safari, which has supported OPFS since 15.2 and sync access handles since 17.
 

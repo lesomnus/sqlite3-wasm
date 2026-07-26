@@ -481,7 +481,14 @@ export class Session {
 
 	/** Finalizes a statement outright, bypassing the cache. */
 	discard(stmt: PreparedStatement): void {
-		this.cache.delete(stmt.sql)
+		// By identity, not by key. Two statements can be compiled from the same
+		// SQL — prepareOne compiles a fresh one whenever the cache is empty —
+		// and deleting the key would drop a *different*, still-cached statement
+		// from the map while finalizing only this one. The orphan would then be
+		// invisible to clearCache, so sqlite3_close_v2 would be handed a
+		// database with a live statement and leak the whole handle, its page
+		// cache and its VFS lock.
+		if (this.cache.get(stmt.sql) === stmt) this.cache.delete(stmt.sql)
 		this.raw.sqlite3_finalize(stmt.pStmt)
 	}
 

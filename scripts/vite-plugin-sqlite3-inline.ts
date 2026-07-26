@@ -71,10 +71,24 @@ export function sqlite3Inline(): Plugin {
 		},
 
 		// (3) Turn the silent de-isolation into an error.
+		//
+		// replaceAll, not replace: a chunk can hold more than one copy of the
+		// wrapper. dist/runtime-*.js embeds the whole go-runtime worker source
+		// as a template literal, so the first textual match is the *database*
+		// worker's wrapper inside that string — already patched by the nested
+		// worker pass — and a single replace would leave the real, exported
+		// wrapper untouched with its data: fallback intact.
 		renderChunk(code) {
-			if (!code.includes(DATA_WORKER_NEEDLE)) return null
+			if (!code.includes('WorkerWrapper')) return null
+			if (!code.includes(DATA_WORKER_NEEDLE)) {
+				this.error(
+					'sqlite3-wasm-go: a chunk defines WorkerWrapper but does not match the ' +
+						"data: worker fallback. Vite's inline-worker helper has changed shape; " +
+						're-check the needle before bumping vite.',
+				)
+			}
 			return {
-				code: code.replace(
+				code: code.replaceAll(
 					DATA_WORKER_NEEDLE,
 					'throw new Error(\n      "sqlite3-wasm-go: could not create a blob worker. " +\n      "A data: worker would not be cross-origin isolated, so OPFS and cancellation " +\n      "would silently stop working. Allow worker-src blob: in your CSP." + (e ? " (" + e + ")" : "")\n    ); return new Worker(\n      "data:text/javascript;charset=utf-8," + encodeURIComponent(jsContent),',
 				),

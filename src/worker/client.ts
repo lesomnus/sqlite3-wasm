@@ -218,6 +218,24 @@ export class Client {
 		this.send(new FrameWriter(Op.ABORT, 0, id))
 	}
 
+	/**
+	 * Posts a QUERY with no consumer registered, so its rows are discarded and
+	 * it is never granted credit.
+	 *
+	 * This is exactly the state Go leaves behind when Rows.Close tears the
+	 * route down: the request is in flight, but nothing will ever read from it
+	 * again. Tests need it to reproduce a stream that outlives its reader.
+	 */
+	postOrphanQuery(dbId: number, sql: string): number {
+		const id = this.nextId++
+		const w = new FrameWriter(Op.QUERY, 0, id, 256)
+		w.u32(dbId)
+		w.str(sql)
+		writeArgs(w, [])
+		this.send(w)
+		return id
+	}
+
 	/** Sets the shared cancellation word, the way a ctx watcher does. */
 	cancel(slot: number, requestId: number): void {
 		if (!this.cancelView) throw new Error('no SharedArrayBuffer')

@@ -331,15 +331,31 @@ func (r *Rows) Close() error {
 	return nil
 }
 
+// minColumnBytes is the smallest a column entry can be: two u32 lengths with
+// no bytes behind them.
+const minColumnBytes = 8
+
 func readColumns(r *wire.Reader) []Column {
 	n := r.U32()
 	if r.Err() != nil {
 		return nil
 	}
-	cols := make([]Column, n)
-	for i := range cols {
-		cols[i].Name = r.String()
-		cols[i].DeclType, cols[i].HasDecl = r.NullString()
+	// The count comes off the wire, so it cannot size an allocation on its own:
+	// 0xFFFFFFFF columns is ~171 GB of Column, which is a fatal out-of-memory
+	// rather than a recoverable error, and this runs in the caller's goroutine
+	// where the transport's recover cannot reach it.
+	if int64(n)*minColumnBytes > int64(r.Remaining()) {
+		return nil
+	}
+	cols := make([]Column, 0, n)
+	for i := uint32(0); i < n; i++ {
+		var c Column
+		c.Name = r.String()
+		c.DeclType, c.HasDecl = r.NullString()
+		if r.Err() != nil {
+			return nil
+		}
+		cols = append(cols, c)
 	}
 	return cols
 }

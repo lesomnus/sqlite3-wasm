@@ -23,6 +23,7 @@ func main() {
 	testReadOnlyTx()
 	testPooledMemory()
 	testPooledPersistent()
+	testFailedCommit()
 	testIndependentDatabases()
 	testUnsupportedDSNs()
 
@@ -180,6 +181,45 @@ func testPooledPersistent() {
 	var x int
 	assert.NoErr(second.QueryRowContext(ctx, `SELECT x FROM t`).Scan(&x))
 	assert.Eq(x, 7, "both connections see the same database")
+}
+
+// SQLite does not end a transaction when COMMIT fails — a deferred foreign-key
+// violation leaves it open so the caller can still roll back. database/sql
+// returns the connection to the pool on that error, so the driver's own
+// bookkeeping has to stay accurate or the next caller inherits an open write
+// transaction and its uncommitted rows.
+func testFailedCommit() {
+	db, err := sqlitewasm.OpenDB("file:/conformance-commit?vfs=memdb")
+	assert.NoErr(err)
+	defer db.Close()
+
+	_, err = db.Exec(`
+CREATE TABLE parent (id INTEGER PRIMARY KEY);
+CREATE TABLE child (
+	id  INTEGER PRIMARY KEY,
+	pid INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED
+);`)
+	assert.NoErr(err)
+
+	tx, err := db.Begin()
+	assert.NoErr(err)
+	_, err = tx.Exec(`INSERT INTO child (id, pid) VALUES (1, 999)`)
+	assert.NoErr(err, "a deferred foreign key does not fail at insert time")
+
+	err = tx.Commit()
+	assert.True(err != nil, "COMMIT must fail on the deferred foreign key")
+
+	// The connection has gone back to the pool. If the driver forgot the
+	// transaction was still open, this row would be visible outside it and the
+	// next Begin would fail with "cannot start a transaction within a
+	// transaction".
+	var n int
+	assert.NoErr(db.QueryRow(`SELECT count(*) FROM child`).Scan(&n))
+	assert.Eq(n, 0, "the uncommitted row must not be visible")
+
+	tx2, err := db.Begin()
+	assert.NoErr(err, "a later transaction must still be possible")
+	assert.NoErr(tx2.Rollback())
 }
 
 // Two sql.DB values opened on the same DSN must be independent. They used to

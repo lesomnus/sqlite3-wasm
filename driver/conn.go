@@ -5,7 +5,6 @@ package driver
 import (
 	"context"
 	"database/sql/driver"
-	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -255,5 +254,3 @@ func retry[T any](ctx context.Context, fn func() (T, error)) (T, error) {
 		backoff *= 2
 	}
 }
-
-var errClosedConn = errors.New("sqlite3-wasm: connection is closed")

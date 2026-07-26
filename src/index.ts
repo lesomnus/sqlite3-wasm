@@ -38,15 +38,17 @@ function createWorker(options: CreateWorkerOptions = {}): Worker {
 		)
 	}
 
-	const worker = new DbWorker({ name: 'sqlite3-wasm-go' })
-
-	if (options.wasmUrl) {
-		// Reserved for the inlined build, where the worker cannot resolve a
-		// relative URL of its own.
-		worker.postMessage({ wasmUrl: options.wasmUrl })
-	}
-
+	const worker = new DbWorker({ name: options.name ?? 'sqlite3-wasm-go' })
 	live.add(worker)
+
+	// Prune on termination, or the set retains every worker handle the Go side
+	// has already killed — it calls terminate() directly and never comes back
+	// through here.
+	const terminate = worker.terminate.bind(worker)
+	worker.terminate = () => {
+		live.delete(worker)
+		terminate()
+	}
 	return worker
 }
 
@@ -54,7 +56,10 @@ const api: Sqlite3WasmGo = { protocolVersion: PROTOCOL_VERSION, createWorker }
 
 ;(globalThis as unknown as Record<string, unknown>)[GLOBAL_KEY] = api
 
-if (typeof addEventListener === 'function') {
+// pagehide is a Window event. This module's supported realm is a Worker, where
+// registering it would silently never fire, so it is only wired up when there
+// is actually a document to hide.
+if (typeof document !== 'undefined' && typeof addEventListener === 'function') {
 	addEventListener('pagehide', terminateAll)
 }
 if (import.meta.hot) {

@@ -18,13 +18,8 @@ export const GLOBAL_KEY = 'sqlite3-wasm-go'
 export const LEGACY_GLOBAL_KEY = 'sqlite-wasm-go'
 
 export type CreateWorkerOptions = {
-	/**
-	 * Where to fetch `sqlite3.wasm` from. The default build inlines it, so this
-	 * is an escape hatch for size-sensitive consumers who would rather serve it
-	 * as a separate asset. It must be resolved by the caller, in a realm where
-	 * `import.meta.url` is a real URL.
-	 */
-	wasmUrl?: string
+	/** A name for the worker, as it appears in devtools. */
+	name?: string
 }
 
 export type Sqlite3WasmGo = {

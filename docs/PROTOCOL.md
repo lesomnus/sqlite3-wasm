@@ -294,16 +294,16 @@ for the degraded path.
 `ROWS` frames are pushed eagerly: one request produces N frames with no per-batch
 round trip. Three rules bound it.
 
-**Geometric batch sizes.** Batches grow `1 → 8 → 64 → 512 → 1024` rows, capped
-independently by bytes at `1 KiB → 4 KiB → 32 KiB → 256 KiB`. The first row reaches
-Go after a single `sqlite3_step` instead of after 1024. A one-way push costs 4.4 µs
-at 256 B and 29.6 µs at 256 KiB, so a small first batch is nearly free.
+**Geometric batch sizes.** Batches grow `1 → 8 → 64 → 512 → 1024` rows. The first
+row reaches Go after a single `sqlite3_step` instead of after 1024. A one-way push
+costs 4.4 µs at 256 B and 29.6 µs at 256 KiB, so a small first batch is nearly free.
 
-`MAX_BATCH_BYTES` = 256 KiB is a hard ceiling. Round-trip time is flat at
-31.8–37.4 µs from 4 KiB to 256 KiB but jumps to 127.6 µs at 1 MiB — that is
-allocating and zeroing the payload, not transferring it. A single value larger than
-the ceiling (a 10 MB blob) is sent in its own oversized frame rather than blowing the
-budget silently.
+A flat `MAX_BATCH_BYTES` of 256 KiB caps every batch regardless of stage — there is
+no per-stage byte ladder. Round-trip time is flat at 31.8–37.4 µs from 4 KiB to
+256 KiB but jumps to 127.6 µs at 1 MiB, which is allocating and zeroing the payload
+rather than transferring it. The cap is checked *after* a row is encoded, so a value
+larger than it produces one oversized frame rather than being split; frames are
+self-describing, so a reader must not assume the ceiling.
 
 **A yield between batches.** After each `postMessage` the worker returns to its event
 loop so queued requests from other connections get serviced; otherwise a 100 000-row
@@ -315,9 +315,19 @@ does not drain the `postMessage` task queue, and `setTimeout(…, 0)` is clamped
 flight per request. Go grants credit from the `Rows.Next` consumer, never from the
 message callback. This is a window, not a request/response per batch.
 
+Requests are serialised **per database**, not globally. One sqlite3 handle and one
+statement cache need ordering, but a stream parked on credit would otherwise hold up
+every other connection on the worker, including `CLOSE`.
+
 `ABORT` stops a stream early. It is fire-and-forget; Go must not wait for the reply.
-The worker answers with `ABORTED`. Frames arriving for an aborted or unknown `id` are
-**discarded**, not treated as protocol errors.
+The worker answers with `ABORTED`. Frames arriving *at Go* for an aborted or unknown
+`id` are **discarded**, not treated as protocol errors.
+
+An `ABORT` may arrive **before its own request has started**, because requests queue.
+The worker must remember it and apply it when the request begins. Dropping it is
+fatal: the query would later stream into a route the client has already torn down,
+spend its credit window, and park on a credit that can never arrive — taking the
+whole worker with it.
 
 After an `EOF` frame Go sends nothing at all — the worker has already finalised or
 cached the statement. `Rows.Close` after EOF is therefore free, and `Rows.Close`
@@ -343,10 +353,17 @@ is 390 ns.
 Rules:
 
 - A statement whose prepare left a non-empty tail is **never** cached.
-- The cache for a database is flushed on `SQLITE_SCHEMA` (17) from `step` or `reset`,
-  and on any DDL routed through `EXEC`.
-- Evicted and flushed statements are finalised immediately.
+- Eviction is by **identity**, not by key: two statements can be compiled from the
+  same SQL, so deleting by key alone would orphan a live one.
+- Evicted statements are finalised immediately.
 - `CLOSE` finalises every cached statement before `sqlite3_close_v2`.
+
+There is deliberately **no** flush on `SQLITE_SCHEMA` or on DDL. `sqlite3_prepare_v3`
+recompiles a statement transparently when the schema has changed, so execution stays
+correct by itself. What a cache cannot carry across that is the *description*, which
+is why columns are read after the first `sqlite3_step` rather than cached. Anything
+added to the cached description later would need an invalidation rule that does not
+exist today.
 
 The cache is in the worker, not in Go: a Go-side cache could avoid the recompile but
 not the round trip.

@@ -116,6 +116,27 @@ func TestParseDSN(t *testing.T) {
 			},
 		},
 		{
+			// A bare path may contain a '?', and it has no parameters.
+			name: "a stray question mark stays part of a plain filename",
+			dsn:  "weird?name.db",
+			want: func(t *testing.T, c *Config) {
+				assertEq(t, "filename", c.Filename, "weird?name.db")
+				assertEq(t, "persistent", c.Persistent, true)
+			},
+		},
+		{
+			// ":memory:" does take parameters, and folding them into the
+			// filename silently bypassed every guarantee below.
+			name: "bare :memory: accepts driver parameters",
+			dsn:  ":memory:?_fk=0&_loc=Asia/Seoul",
+			want: func(t *testing.T, c *Config) {
+				assertEq(t, "memory", c.Memory, true)
+				assertEq(t, "vfs", c.VFS, "memdb")
+				assertEq(t, "foreign keys", c.ForeignKeys, false)
+				assertEq(t, "loc", c.Loc.String(), seoul.String())
+			},
+		},
+		{
 			name: "_timezone is accepted as an alias for _loc",
 			dsn:  "file:app.db?_timezone=Asia/Seoul",
 			want: func(t *testing.T, c *Config) { assertEq(t, "loc", c.Loc.String(), seoul.String()) },
@@ -168,6 +189,17 @@ func TestParseDSNRejections(t *testing.T) {
 			// to deliver the COMMIT releasing the lock.
 			name:    "_busy_timeout",
 			dsn:     "file:x?_busy_timeout=5000",
+			mustSay: "deadlock",
+		},
+		{
+			// The most common DSN in the mattn ecosystem, in its bare form.
+			name:    "bare :memory: with cache=shared",
+			dsn:     ":memory:?cache=shared",
+			mustSay: "vfs=memdb",
+		},
+		{
+			name:    "bare :memory: with _busy_timeout",
+			dsn:     ":memory:?_busy_timeout=5000",
 			mustSay: "deadlock",
 		},
 		{

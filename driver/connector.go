@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"database/sql/driver"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -124,11 +125,22 @@ func (c *Connector) checkVFS(w *binding.Worker) error {
 	return fmt.Errorf("sqlite3-wasm: no such vfs: %s (available: %v)", c.cfg.VFS, info.VFSList)
 }
 
-// Close terminates the worker. database/sql calls it from DB.Close.
+// Close terminates the worker, if one was ever started.
+//
+// It deliberately does not go through ensureWorker: sql.Open is lazy, so
+// closing a *sql.DB that never ran a statement would otherwise spawn a worker
+// — 16 MiB of linear memory and a full wasm compile — purely to terminate it,
+// and could block for the whole handshake timeout doing so. Claiming the once
+// instead also makes any later Connect fail cleanly rather than resurrect the
+// connector.
 func (c *Connector) Close() error {
-	w, _ := c.ensureWorker(context.Background())
-	if w != nil {
-		w.Close()
+	c.workerOnce.Do(func() {
+		c.workerErr = errClosedConnector
+	})
+	if c.worker != nil {
+		c.worker.Close()
 	}
 	return nil
 }
+
+var errClosedConnector = errors.New("sqlite3-wasm: this connector is closed")

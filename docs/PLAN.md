@@ -222,6 +222,67 @@ green, and the README describes what ships.
 
 ## Changelog
 
+### Review — 16 confirmed defects, fixed
+
+With everything green, the finished implementation went through an adversarial
+review: five reviewers over the transport, the driver, the worker, the protocol and
+the packaging, then every candidate finding handed to a separate verifier told to
+refute it by default. 18 candidates, **16 confirmed and 2 refuted**.
+
+The worst was found independently by three reviewers and reproduced by the verifier
+on a clean checkout, in all three engines:
+
+**An `ABORT` for a request that has not started yet was dropped, and wedged the
+worker permanently.** Requests queue on a serial chain, but a stream is only
+registered once its request reaches the front — so an abort arriving in that window
+found nothing and was discarded. The query then ran, streamed into a route Go had
+already torn down, spent its credit window and parked on a credit that could never
+arrive. `chain` never advanced again: every later request on that worker, from every
+connection, including `CLOSE`, hung forever. An ordinary query timeout was enough to
+trigger it. Aborts are now remembered until their request starts.
+
+The other fifteen, in rough order of consequence:
+
+- **A failed `COMMIT` returned the connection to the pool inside an open
+  transaction.** SQLite keeps the transaction open when COMMIT fails — a deferred
+  foreign-key violation, `SQLITE_BUSY` — but `Tx.finish` cleared its own bookkeeping
+  regardless, so `ResetSession`'s rollback never fired. Reproduced: the uncommitted
+  row was visible outside the transaction on the next query.
+- **Every request was serialised behind every streaming query**, so one slow
+  consumer stalled all other connections — while PROTOCOL.md claimed the opposite.
+  Chains are per database now; ordering within a database is still strict.
+- **Too few arguments were silently bound as NULL.** `db.Exec("… VALUES (?,?)", 1)`
+  inserted `(1, NULL)` and reported success; mattn/go-sqlite3 errors.
+- **A bare `:memory:` DSN with a query string was parsed as a file path**, bypassing
+  the driver parameters and both hard rejections — `:memory:?cache=shared`, the most
+  common DSN in the ecosystem, was silently accepted.
+- **The `data:` worker guard patched only the first occurrence.** A string `replace`
+  left the *exported* wrapper — the one `runGoWasm` calls — with its fallback intact,
+  so a CSP without `worker-src blob:` would have silently de-isolated the worker.
+- **The emitted `.d.ts` files used extensionless relative imports**, so under
+  `moduleResolution: node16/nodenext` the entire public type surface degraded to
+  `any` — silently, under the near-universal `skipLibCheck: true`.
+- **Two connections to one database could not both be typed as `sql.DB`s** — the
+  connector memoisation bug found separately, before the review.
+- `Connector.Close` spawned a worker purely to terminate it, so closing an unused
+  `sql.DB` cost a wasm compile and could block for the handshake timeout.
+- A wire-supplied `u32` count sized an allocation in `readColumns`/`readReady`, so a
+  12-byte malformed frame could kill the program with an unrecoverable OOM.
+- A startup `ERROR` frame — sent precisely so the reason would survive — was
+  discarded in favour of "expected READY, got ERROR".
+- `CreateWorkerOptions.wasmUrl` was documented public API that nothing implemented.
+- Three documentation claims that were not true of the code: a per-stage byte ladder,
+  a statement-cache flush on `SQLITE_SCHEMA`, and a browser floor lower than the
+  feature that sets it.
+
+Every non-documentation fix has a test, and each test was checked against the
+reverted code — the wedge, the failed commit, the head-of-line block and the
+connector sharing all fail without their fix, in all three engines.
+
+The two refuted findings were an eviction-by-key hazard in the statement cache and a
+worker registry that never pruned. Both were tightened anyway: they cost nothing and
+the reasoning for keeping them as-is was thinner than the reasoning for fixing them.
+
 ### Closing out — the shipped Go-worker entry, and three engines
 
 `sqlite3-wasm-go/go-worker` now exports `runGoWasm(wasmUrl, opts)`, so the

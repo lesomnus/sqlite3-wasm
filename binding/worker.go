@@ -259,6 +259,12 @@ func (w *Worker) readReady(frame []byte) error {
 	if err != nil {
 		return err
 	}
+	// The worker posts a real ERROR frame with id 0 when it cannot start —
+	// BigInt disabled, a CSP that blocks the wasm compile — precisely so the
+	// reason survives. The reader is already positioned at its payload.
+	if h.Op == wire.OpError {
+		return readError(r)
+	}
 	if h.Op != wire.OpReady {
 		return fmt.Errorf("sqlite3-wasm: expected READY, got %v", h.Op)
 	}
@@ -268,8 +274,10 @@ func (w *Worker) readReady(frame []byte) error {
 		SQLiteVersion:   r.String(),
 		Capabilities:    Capabilities(r.U32()),
 	}
+	// Bounded by what the frame can actually hold, for the same reason as
+	// readColumns: a corrupt count must not become an allocation.
 	n := r.U32()
-	for i := uint32(0); i < n; i++ {
+	for i := uint32(0); i < n && r.Err() == nil && r.Remaining() > 0; i++ {
 		info.VFSList = append(info.VFSList, r.String())
 	}
 	if err := r.Err(); err != nil {

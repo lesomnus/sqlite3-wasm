@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, test } from 'vitest'
 
@@ -44,8 +44,28 @@ describe('the built bundle', () => {
 	// A data: worker has an opaque origin, so it is not cross-origin isolated
 	// and has no SharedArrayBuffer: no OPFS, no cancellation. Failing loudly
 	// beats degrading silently.
-	test('refuses to fall back to a data: worker', () => {
-		expect(dist).toContain('could not create a blob worker')
+	//
+	// Every emitted chunk is checked, not just the entry: a chunk can hold more
+	// than one copy of Vite's worker wrapper, and a single string replace
+	// patched only the first — leaving the real, exported one unguarded.
+	test('refuses to fall back to a data: worker, in every chunk', () => {
+		const dir = fileURLToPath(new URL('../dist', import.meta.url))
+		let sites = 0
+		for (const name of readdirSync(dir)) {
+			if (!name.endsWith('.js')) continue
+			const code = readFileSync(`${dir}/${name}`, 'utf8')
+			for (let i = code.indexOf('data:text/javascript'); i !== -1; ) {
+				sites++
+				const before = code.slice(Math.max(0, i - 400), i)
+				expect(before, `unguarded data: worker in ${name} at ${i}`).toContain(
+					'could not create a blob worker',
+				)
+				i = code.indexOf('data:text/javascript', i + 1)
+			}
+		}
+		// If Vite stops emitting the fallback the guard is pointless, and the
+		// plugin's this.error would not have fired; notice that too.
+		expect(sites).toBeGreaterThan(0)
 	})
 })
 
@@ -85,5 +105,22 @@ describe('the built go-worker entry', () => {
 	test('is self-contained apart from that one chunk', () => {
 		const refs = runtimeChunk().match(/new URL\((?:\/\* @vite-ignore \*\/ )?\\?"[^"]{0,120}\\?"/g)
 		expect(refs).toBeNull()
+	})
+})
+
+describe('the emitted type declarations', () => {
+	// vite-plugin-dts writes extensionless relative imports by default. The
+	// package is "type": "module", so under moduleResolution node16/nodenext
+	// those do not resolve and the entire public type surface degrades to
+	// `any` — silently, under the near-universal skipLibCheck: true.
+	test('have no unresolvable relative imports', () => {
+		const dir = fileURLToPath(new URL('../dist', import.meta.url))
+		for (const name of readdirSync(dir)) {
+			if (!name.endsWith('.d.ts')) continue
+			const code = readFileSync(`${dir}/${name}`, 'utf8')
+			const relative = code.match(/from ['"]\.[^'"]*['"]/g) ?? []
+			const extensionless = relative.filter((r) => !/\.js['"]$/.test(r))
+			expect(extensionless, `${name} imports ${extensionless.join(', ')}`).toEqual([])
+		}
 	})
 })

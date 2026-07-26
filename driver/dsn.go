@@ -108,21 +108,17 @@ func ParseDSN(dsn string) (*Config, error) {
 
 	head, rawQuery, hasQuery := strings.Cut(dsn, "?")
 
-	if !strings.HasPrefix(head, "file:") {
-		// A bare path has no parameters; a stray '?' belongs to the filename.
-		if hasQuery {
-			head = dsn
-			rawQuery, hasQuery = "", false
-		}
-		switch head {
-		case ":memory:":
-			cfg.Memory, cfg.anonymousMemory, cfg.VFS = true, true, "memdb"
-		case "":
-			// SQLite opens a private temporary database.
-		default:
-			cfg.Filename, cfg.Persistent = head, true
-		}
-		return cfg, nil
+	// A plain relative path may legitimately contain a '?', and it has no
+	// parameters — but ":memory:" and an empty path do take them, and folding
+	// the query back into the filename there would silently bypass every
+	// guarantee below: the driver parameters, the cache= and _busy_timeout
+	// rejections, and the memdb rewrite. `:memory:?cache=shared` is the single
+	// most common DSN in the ecosystem.
+	isURI := strings.HasPrefix(head, "file:")
+	takesQuery := isURI || head == ":memory:" || head == ""
+	if !takesQuery && hasQuery {
+		head = dsn
+		rawQuery, hasQuery = "", false
 	}
 
 	var q url.Values
@@ -157,7 +153,7 @@ func ParseDSN(dsn string) (*Config, error) {
 				"so it would be silently ignored); use vfs=memdb for a shared in-memory database", cache)
 	}
 
-	isMemory := head == "file::memory:" || q.Get("mode") == "memory"
+	isMemory := head == "file::memory:" || head == ":memory:" || q.Get("mode") == "memory"
 	switch {
 	case cfg.VFS == "memdb":
 		// An explicitly named memdb path is already shared between handles.
@@ -167,7 +163,9 @@ func ParseDSN(dsn string) (*Config, error) {
 		delete(q, "mode")
 		delete(q, "vfs")
 	default:
-		cfg.Persistent = head != "file:"
+		// "" is SQLite's private temporary database, "file:" the same in URI
+		// form; neither is a persistent file.
+		cfg.Persistent = head != "file:" && head != ""
 	}
 
 	if !cfg.anonymousMemory {

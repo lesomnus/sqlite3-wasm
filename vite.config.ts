@@ -28,9 +28,14 @@ export default defineConfig({
   plugins: [
     sqlite3Inline(),
     dts({
-			tsconfigPath: "./tsconfig.build.json",
+      tsconfigPath: './tsconfig.build.json',
       insertTypesEntry: true,
       outDir: 'dist',
+      // Without this the emitted .d.ts files import './global' and './wire'
+      // with no extension. The package is "type": "module", so under
+      // moduleResolution node16/nodenext those specifiers do not resolve and
+      // the whole public type surface silently degrades to `any`.
+      rollupTypes: true,
     }),
   ],
   server: {

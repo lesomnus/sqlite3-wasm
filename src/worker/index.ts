@@ -47,8 +47,32 @@ type Stream = {
 	wake: (() => void) | null
 }
 
+/**
+ * Aborts that arrived before their request started.
+ *
+ * Bounded so a client that aborts ids which never arrive cannot grow it
+ * without limit; the oldest entry is dropped, which at worst costs one
+ * wasted scan rather than a wedged worker.
+ */
+const abortedBeforeStart = new Set<number>()
+const MAX_EARLY_ABORTS = 1024
+
+function rememberAbort(id: number): void {
+	abortedBeforeStart.add(id)
+	while (abortedBeforeStart.size > MAX_EARLY_ABORTS) {
+		const oldest = abortedBeforeStart.values().next()
+		if (oldest.done) break
+		abortedBeforeStart.delete(oldest.value)
+	}
+}
+
+/** Consumes an early abort for this id, if one is pending. */
+function takeEarlyAbort(id: number): boolean {
+	return abortedBeforeStart.delete(id)
+}
+
 const sessions = new Map<number, Session>()
-const statements = new Map<number, { session: Session; stmt: PreparedStatement }>()
+const statements = new Map<number, { session: Session; stmt: PreparedStatement; dbId: number }>()
 const streams = new Map<number, Stream>()
 
 let sqlite3: Sqlite3
@@ -111,7 +135,37 @@ function macrotask(): Promise<void> {
 
 // -- dispatch ---------------------------------------------------------------
 
-let chain: Promise<void> = Promise.resolve()
+/**
+ * One serial chain per database, plus a global one keyed 0 for requests that
+ * do not belong to a database yet.
+ *
+ * Serialising *within* a database is required: one sqlite3 handle, one
+ * statement cache. Serialising across databases is not, and doing it means a
+ * streaming query holds the chain for as long as its consumer takes to drain
+ * it — so a slow reader on one connection stalls every other connection on the
+ * worker, including CLOSE.
+ */
+const chains = new Map<number, Promise<void>>()
+
+function chainKey(op: number, data: Uint8Array): number {
+	switch (op) {
+		case Op.CLOSE:
+		case Op.PREPARE:
+		case Op.QUERY:
+		case Op.EXEC:
+			// dbId is the first payload field.
+			return FrameReader.header(data).reader.u32()
+		case Op.FINALIZE:
+		case Op.QUERY_STMT:
+		case Op.EXEC_STMT: {
+			const stmtId = FrameReader.header(data).reader.u32()
+			return statements.get(stmtId)?.dbId ?? 0
+		}
+		default:
+			// OPEN has no database yet; SHUTDOWN concerns all of them.
+			return 0
+	}
+}
 
 function dispatch(data: unknown): void {
 	if (!(data instanceof Uint8Array)) {
@@ -143,13 +197,35 @@ function dispatch(data: unknown): void {
 		if (s) {
 			s.aborted = true
 			s.wake?.()
+		} else {
+			// The request has not started yet — it is still queued behind
+			// another one on `chain`. Dropping the abort here would be fatal:
+			// the query would later stream into a route Go has already torn
+			// down, spend its credit window and park forever on a credit that
+			// can never arrive, taking the whole worker with it.
+			rememberAbort(header.id)
 		}
 		return
 	}
 
-	chain = chain.then(() => handle(header.op, header.id, reader)).catch((e) => {
-		postError(header.id, e)
-	})
+	let key: number
+	try {
+		key = chainKey(header.op, data)
+	} catch {
+		key = 0
+	}
+
+	const next = (chains.get(key) ?? Promise.resolve())
+		.then(() => handle(header.op, header.id, reader))
+		.catch((e) => {
+			postError(header.id, e)
+		})
+		.finally(() => {
+			// Nothing will look this id up again.
+			abortedBeforeStart.delete(header.id)
+			if (chains.get(key) === next) chains.delete(key)
+		})
+	chains.set(key, next)
 }
 
 async function handle(op: number, id: number, r: FrameReader): Promise<void> {
@@ -192,7 +268,7 @@ function sessionOf(dbId: number): Session {
 	return s
 }
 
-function statementOf(stmtId: number): { session: Session; stmt: PreparedStatement } {
+function statementOf(stmtId: number): { session: Session; stmt: PreparedStatement; dbId: number } {
 	const e = statements.get(stmtId)
 	if (!e) throw new Error(`sqlite3-wasm worker: unknown statement ${stmtId}`)
 	return e
@@ -260,10 +336,11 @@ async function shutdown(id: number): Promise<void> {
 // -- statements -------------------------------------------------------------
 
 function prepareStatement(id: number, r: FrameReader): void {
-	const session = sessionOf(r.u32())
+	const dbId = r.u32()
+	const session = sessionOf(dbId)
 	const stmt = session.prepareOne(r.str())
 	const stmtId = nextStmtId++
-	statements.set(stmtId, { session, stmt })
+	statements.set(stmtId, { session, stmt, dbId })
 
 	const w = new FrameWriter(Op.PREPARED, Flag.EOF, id, 128)
 	w.u32(stmtId)
@@ -300,6 +377,14 @@ function writeColumnList(w: FrameWriter, columns: Column[]): void {
 /** Binds every argument in the frame, in wire order. */
 function bindArgs(session: Session, stmt: PreparedStatement, r: FrameReader): void {
 	const count = r.u32()
+
+	// An unbound parameter is NULL, so a caller who passes too few arguments
+	// would silently insert NULLs rather than get an error. database/sql
+	// cannot catch this for us: NumInput is -1 whenever the count is not
+	// trustworthy, and the Execer/Queryer fast path skips the check entirely.
+	// Named parameters are exempt, since one value can fill several slots.
+	let positional = 0
+
 	for (let k = 0; k < count; k++) {
 		const name = r.nstr()
 		const ordinal = r.u32()
@@ -310,6 +395,8 @@ function bindArgs(session: Session, stmt: PreparedStatement, r: FrameReader): vo
 			if (!i) {
 				throw new SqliteError(1, 1, -1, `sqlite3-wasm: no such parameter: ${name}`)
 			}
+		} else {
+			positional++
 		}
 
 		let rc: number
@@ -332,6 +419,15 @@ function bindArgs(session: Session, stmt: PreparedStatement, r: FrameReader): vo
 		}
 		session.check(rc)
 	}
+
+	if (positional === count && count < stmt.paramCount) {
+		throw new SqliteError(
+			1,
+			1,
+			-1,
+			`sqlite3-wasm: statement has ${stmt.paramCount} parameter(s), but ${count} argument(s) were given`,
+		)
+	}
 }
 
 // -- queries ----------------------------------------------------------------
@@ -345,7 +441,13 @@ async function runQuery(
 ): Promise<void> {
 	const { raw, constants: C } = session
 
-	const stream: Stream = { id, credit: CREDIT_WINDOW, aborted: false, wake: null }
+	const stream: Stream = {
+		id,
+		credit: CREDIT_WINDOW,
+		// An abort may have arrived while this request was still queued.
+		aborted: takeEarlyAbort(id),
+		wake: null,
+	}
 	streams.set(id, stream)
 	session.runningRequestId = id
 
@@ -490,6 +592,14 @@ function runExec(id: number, session: Session, sql: string, r: FrameReader): voi
 	try {
 		const n = session.forEachStatement(sql, (stmt) => {
 			const take = stmt.paramCount
+			if (at + take > args.length) {
+				throw new SqliteError(
+					1,
+					1,
+					-1,
+					`sqlite3-wasm: statement needs ${take} argument(s), only ${args.length - at} left`,
+				)
+			}
 			bindDecoded(session, stmt, args.slice(at, at + take))
 			at += take
 			stepToCompletion(session, stmt)
