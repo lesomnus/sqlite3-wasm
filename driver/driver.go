@@ -5,7 +5,6 @@ package driver
 import (
 	"context"
 	"database/sql/driver"
-	"sync"
 )
 
 // Driver is the database/sql driver registered as "sqlite3-wasm".
@@ -16,44 +15,41 @@ var (
 	_ driver.DriverContext = Driver{}
 )
 
-// connectors memoises one Connector per DSN.
+// Open is the legacy entry point. database/sql prefers OpenConnector because
+// this driver implements DriverContext, so this is only reached by a caller
+// using the driver directly.
 //
-// Driver.Open is a second entry point into the same DSN, and each Connector
-// owns a database worker; without memoisation the two paths would each spawn
-// one, and for a file-backed database that means two handles racing for the
-// same exclusive OPFS access handle.
-var (
-	connectorsMu sync.Mutex
-	connectors   = map[string]*Connector{}
-)
-
-func (Driver) Open(name string) (driver.Conn, error) {
-	c, err := Driver{}.OpenConnector(name)
+// The connection owns the connector it was minted from, and closing it
+// terminates that connector's worker — otherwise this path would leak one
+// worker per call.
+func (d Driver) Open(name string) (driver.Conn, error) {
+	c, err := newConnector(name)
 	if err != nil {
 		return nil, err
 	}
-	return c.Connect(context.Background())
+	conn, err := c.Connect(context.Background())
+	if err != nil {
+		_ = c.Close()
+		return nil, err
+	}
+	conn.(*Conn).owned = c
+	return conn, nil
 }
 
-func (Driver) OpenConnector(name string) (driver.Connector, error) {
-	connectorsMu.Lock()
-	defer connectorsMu.Unlock()
+// OpenConnector returns a fresh connector, and therefore a fresh worker, per
+// call.
+//
+// Connectors are deliberately *not* memoised by DSN. Each sql.DB closes the
+// connector it was opened with, so sharing one between two sql.DB values on the
+// same DSN would mean closing either of them terminated the other's worker.
+func (d Driver) OpenConnector(name string) (driver.Connector, error) {
+	return newConnector(name)
+}
 
-	if c, ok := connectors[name]; ok {
-		return c, nil
-	}
-	cfg, err := ParseDSN(name)
+func newConnector(dsn string) (*Connector, error) {
+	cfg, err := ParseDSN(dsn)
 	if err != nil {
 		return nil, err
 	}
-	c := &Connector{dsn: name, cfg: cfg}
-	connectors[name] = c
-	return c, nil
-}
-
-// forgetConnector drops a closed Connector so a later Open starts fresh.
-func forgetConnector(dsn string) {
-	connectorsMu.Lock()
-	defer connectorsMu.Unlock()
-	delete(connectors, dsn)
+	return &Connector{dsn: dsn, cfg: cfg}, nil
 }

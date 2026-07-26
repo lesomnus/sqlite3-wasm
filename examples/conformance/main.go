@@ -23,6 +23,7 @@ func main() {
 	testReadOnlyTx()
 	testPooledMemory()
 	testPooledPersistent()
+	testIndependentDatabases()
 	testUnsupportedDSNs()
 
 	fmt.Println("conformance ok")
@@ -179,6 +180,29 @@ func testPooledPersistent() {
 	var x int
 	assert.NoErr(second.QueryRowContext(ctx, `SELECT x FROM t`).Scan(&x))
 	assert.Eq(x, 7, "both connections see the same database")
+}
+
+// Two sql.DB values opened on the same DSN must be independent. They used to
+// share a memoised connector, and therefore a worker, so closing either one
+// terminated the other's database.
+func testIndependentDatabases() {
+	const dsn = "file:/conformance-independent?vfs=memdb"
+
+	first, err := sql.Open("sqlite3-wasm", dsn)
+	assert.NoErr(err)
+	second, err := sql.Open("sqlite3-wasm", dsn)
+	assert.NoErr(err)
+	defer second.Close()
+
+	assert.NoErr(first.Ping())
+	assert.NoErr(second.Ping())
+
+	assert.NoErr(first.Close())
+
+	// The survivor must still work.
+	var one int
+	assert.NoErr(second.QueryRow(`SELECT 1`).Scan(&one), "closing one sql.DB must not kill the other")
+	assert.Eq(one, 1)
 }
 
 func testUnsupportedDSNs() {

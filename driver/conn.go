@@ -19,6 +19,11 @@ type Conn struct {
 	db  *binding.DB
 	cfg *Config
 
+	// owned is set only on the legacy Driver.Open path, where the connection
+	// is the sole owner of its connector and must tear the worker down with
+	// it. On the DriverContext path database/sql closes the connector itself.
+	owned *Connector
+
 	// inTx tracks explicit transactions so a connection returned to the pool
 	// while one is open gets rolled back rather than silently enrolling the
 	// next caller's statements.
@@ -43,7 +48,12 @@ var (
 )
 
 func (c *Conn) Close() error {
-	return c.db.Close(context.Background())
+	err := c.db.Close(context.Background())
+	if c.owned != nil {
+		_ = c.owned.Close()
+		c.owned = nil
+	}
+	return err
 }
 
 func (c *Conn) Ping(ctx context.Context) error {

@@ -126,7 +126,6 @@ func (c *Connector) checkVFS(w *binding.Worker) error {
 
 // Close terminates the worker. database/sql calls it from DB.Close.
 func (c *Connector) Close() error {
-	forgetConnector(c.dsn)
 	w, _ := c.ensureWorker(context.Background())
 	if w != nil {
 		w.Close()
