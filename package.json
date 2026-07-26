@@ -5,26 +5,38 @@
   "license": "MIT",
   "type": "module",
   "files": [
-    "dist"
+    "dist",
+    "src/wasm_exec.js",
+    "src/wasm_exec.d.ts"
   ],
   "sideEffects": [
-    "./dist/index.es.js"
+    "./dist/index.es.js",
+    "./dist/go-worker.es.js",
+    "./src/index.ts",
+    "./src/wasm_exec.js",
+    "./src/go-worker/runtime.ts"
   ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.es.js"
     },
+    "./go-worker": {
+      "types": "./dist/go-worker.d.ts",
+      "import": "./dist/go-worker.es.js"
+    },
+    "./wasm_exec.js": "./src/wasm_exec.js",
     "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && npm run check:wasm-exec && vite build",
     "build:examples": "tsx scripts/build-examples.mts",
     "gen:wire": "python3 scripts/gen-wire-vectors.py",
     "pretest": "npm run build:examples && npm run build",
     "test": "vitest run",
     "test:node": "vitest run --project node",
-    "test:browser": "vitest run --project browser"
+    "test:browser": "vitest run --project browser",
+    "check:wasm-exec": "tsx scripts/check-wasm-exec.mts"
   },
   "devDependencies": {
     "@sqlite.org/sqlite-wasm": "3.50.4-build1",

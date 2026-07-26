@@ -29,7 +29,16 @@ export default defineConfig({
 			provider: playwright(),
 			// https://vitest.dev/guide/browser/playwright
 			headless: true,
-			instances: [{ browser: 'chromium' }],
+			// Every platform claim this library rests on — nested module workers,
+			// blob-worker isolation inheritance, SharedArrayBuffer, OPFS sync
+			// access handles — was verified on Chromium first. Firefox and WebKit
+			// run the same suite so a claim that is only true of one engine
+			// cannot go unnoticed.
+			instances: [
+				{ browser: 'chromium' },
+				{ browser: 'firefox' },
+				{ browser: 'webkit' },
+			],
 		},
 	},
 })

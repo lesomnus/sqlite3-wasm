@@ -36,10 +36,15 @@ func testCancellation() {
 	assert.NoErr(err)
 	defer db.Close()
 
+	// Warm up first. The very first database access also carries the worker
+	// handshake, so timing a cancellation against a cold connection would
+	// measure worker startup instead of statement interruption.
+	assert.NoErr(db.Ping())
+
 	const forever = `WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 1000000000)
 	                 SELECT count(*) FROM c`
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
 	started := time.Now()

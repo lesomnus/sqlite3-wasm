@@ -229,8 +229,16 @@ func Spawn(ctx context.Context) (*Worker, error) {
 	frame, err := handshake.next(hctx)
 	if err != nil {
 		w.Close()
+		// The caller's own deadline must surface as its own error: the first
+		// database access carries the handshake, and a caller that budgeted
+		// 200ms for a query is entitled to see context.DeadlineExceeded rather
+		// than a message about worker startup it cannot act on.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, errors.New("sqlite3-wasm: the database worker did not become ready")
+			return nil, fmt.Errorf(
+				"sqlite3-wasm: the database worker did not become ready within %s", handshakeTimeout)
 		}
 		return nil, err
 	}

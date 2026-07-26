@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest'
 
+import { hasOpfs } from './capabilities'
 import { Cap } from './wire'
 import { Client } from './worker/client'
 
@@ -37,11 +38,14 @@ describe('the built bundle at runtime', () => {
 			const ready = await client.ready
 			expect(ready.protocolVersion).toBe(version)
 
-			// The whole point of inlining the OPFS async proxy: without it the
-			// installer fails, the failure is swallowed into a warning, and the
-			// VFS is simply absent.
-			expect(ready.vfsList).toContain('opfs')
-			expect(ready.capabilities & Cap.VFS_OPFS).toBeTruthy()
+			// The whole point of inlining the OPFS async proxy: where OPFS
+			// exists, the installer must succeed. When it fails the failure is
+			// swallowed into a console warning and the VFS is simply absent, so
+			// this is the only thing that would notice.
+			if (hasOpfs()) {
+				expect(ready.vfsList).toContain('opfs')
+				expect(ready.capabilities & Cap.VFS_OPFS).toBeTruthy()
+			}
 			expect(ready.capabilities & Cap.PROGRESS_HANDLER).toBeTruthy()
 
 			const { dbId } = await client.open('file:/dist-smoke?vfs=memdb', 'memdb')
@@ -55,7 +59,7 @@ describe('the built bundle at runtime', () => {
 
 	// The claim that makes persistence real, exercised against the built
 	// artifact and a genuine OPFS file rather than memdb.
-	test('an OPFS database persists across workers', async () => {
+	test.runIf(hasOpfs())('an OPFS database persists across workers', async () => {
 		const { api } = await loadDist()
 
 		const name = `dist-opfs-${Math.random().toString(36).slice(2)}.db`

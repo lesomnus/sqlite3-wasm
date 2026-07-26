@@ -1,5 +1,7 @@
 import { expect, test } from 'vitest'
 
+import { hasOpfs } from './capabilities'
+
 // Cross-origin isolation is a silent dependency: without the COOP/COEP pair the
 // opfs VFS installer's preconditions fail, sqlite3InitModule() still resolves,
 // and the only symptom is `opfs` missing from sqlite3_js_vfs_list(). Assert it
@@ -11,7 +13,7 @@ test('the test page is cross-origin isolated', () => {
 	expect(typeof Atomics).toBe('object')
 })
 
-test('OPFS is reachable from the page', () => {
+test.runIf(hasOpfs())('OPFS is reachable from the page', () => {
 	expect(typeof navigator.storage?.getDirectory).toBe('function')
 	// createSyncAccessHandle is [Exposed=DedicatedWorker], so it is absent
 	// here by design. That is why sqlite3 refuses to install the opfs VFS
@@ -26,14 +28,16 @@ test('OPFS is reachable from the page', () => {
 // inlined blob module worker, and that only works if a blob: worker inherits
 // the page's cross-origin isolation. (A data: worker does not — opaque origin,
 // no SharedArrayBuffer — which is why Vite's data: fallback must never fire.)
-test('a blob module worker inherits cross-origin isolation and can reach OPFS', async () => {
+test('a blob module worker inherits cross-origin isolation and can nest', async () => {
 	const src = `
 		self.postMessage({
 			coi: self.crossOriginIsolated,
 			sab: typeof SharedArrayBuffer,
 			atomicsWait: typeof Atomics?.wait,
-			syncAccess: typeof FileSystemFileHandle.prototype.createSyncAccessHandle,
 			nested: typeof Worker,
+			syncAccess: typeof self.FileSystemFileHandle === 'undefined'
+				? 'no-opfs'
+				: typeof FileSystemFileHandle.prototype.createSyncAccessHandle,
 		})
 	`
 	const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }))
@@ -51,13 +55,13 @@ test('a blob module worker inherits cross-origin isolation and can reach OPFS', 
 			}
 		})
 
-		expect(got).toEqual({
-			coi: true,
-			sab: 'function',
-			atomicsWait: 'function',
-			syncAccess: 'function',
-			nested: 'function',
-		})
+		expect(got.coi).toBe(true)
+		expect(got.sab).toBe('function')
+		expect(got.atomicsWait).toBe('function')
+		expect(got.nested).toBe('function')
+		// Where OPFS exists at all, a blob worker must be able to reach the
+		// sync access handles the VFS depends on.
+		expect(got.syncAccess).toBe(hasOpfs() ? 'function' : 'no-opfs')
 	} finally {
 		worker.terminate()
 		URL.revokeObjectURL(url)

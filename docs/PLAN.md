@@ -101,19 +101,25 @@ Exit: **met** — 43 protocol-level tests pass in Chromium.
 - [x] `src/index.ts` — installs `{protocolVersion, createWorker}`, keeps a worker
       registry, tears down on `pagehide` and `import.meta.hot.dispose`, guards SSR.
 - [x] The worker is inlined into the entry (`?worker&inline`).
-- [ ] Lazy `import()` so the 1.6 MB stays off the critical path until the first
-      `createWorker`, and the per-path worker reuse map.
-- [ ] `src/go-worker.ts` — `createGoRuntimeWorker(goWasmUrl, opts)` with vendored,
-      pinned `wasm_exec.js`. Until it ships, the consumer still writes the ~10-line
-      Go-worker entry the README shows.
+- [x] The `go-worker` entry is 1.4 kB and lazily `import()`s the 1.7 MB runtime, so
+      it stays off the importing page's critical path. `src/index.ts` keeps its
+      worker static on purpose: it is imported *inside* the Go worker, which always
+      needs it, and making `createWorker` async would change the Go-facing contract
+      for no gain.
+- [ ] A per-path worker reuse map. Measurement says it is unnecessary — several
+      connections to one OPFS file already work — so this is only worth doing if a
+      real case turns up.
+- [x] `src/go-worker.ts` — `runGoWasm(goWasmUrl, opts)`, with `wasm_exec.js` vendored
+      and exposed as `sqlite3-wasm-go/wasm_exec.js`.
 - [x] `scripts/vite-plugin-sqlite3-inline.ts` — resolves `@sqlite.org/sqlite-wasm`
       to `sqlite3-bundler-friendly.mjs`, string-patches the OPFS proxy into a nested
       blob, and `this.error()`s if the needle is missing. The wasm is inlined as a
       `data:` URI by Vite's lib mode.
 - [x] Vite's `data:` worker fallback now throws — a `data:` worker is not
       cross-origin isolated, so it would silently lose OPFS and cancellation.
-- [ ] `wasm_exec.js` drift check against `$(go env GOROOT)/lib/wasm/wasm_exec.js`
-      (ships with `src/go-worker.ts`).
+- [x] `scripts/check-wasm-exec.mts` diffs the vendored copy against
+      `$(go env GOROOT)/lib/wasm/wasm_exec.js`, allowing only the two-line exitCode
+      patch, and runs as part of `npm run build`.
 - [x] `package.json`: renamed to `sqlite3-wasm-go`, `private` dropped, `files` and
       `sideEffects` added, `types` first in every exports condition,
       `@sqlite.org/sqlite-wasm` moved to devDependencies and pinned exactly.
@@ -123,9 +129,8 @@ Exit: **met** — 43 protocol-level tests pass in Chromium.
 - [ ] A true downstream consumer app (installed into node_modules, built by its own
       Vite/webpack) rather than importing `dist/` in place.
 
-Exit: **partly met** — the bundle is one self-contained file with a working OPFS
-database, verified against the built artifact. The consumer still hand-writes the
-Go-worker entry until `src/go-worker.ts` ships.
+Exit: **met** — a consumer imports `runGoWasm`, passes their own `.wasm` URL, and
+gets a working OPFS database. Verified against the built artifact.
 
 ## Phase 5 — Go transport
 
@@ -189,15 +194,15 @@ transactions, int64 extremes and the error model.
       databases sharing one database; the rejected DSN forms.
 - [x] An OPFS tier: `src/dist.test.ts` round-trips a real OPFS database across two
       workers, against the built bundle.
-- [ ] `firefox` and `webkit` vitest instances with at least a smoke tier. Every
-      platform claim so far is Chromium-only.
+- [x] `firefox` and `webkit` vitest instances running the **whole** browser suite,
+      not just a smoke tier.
 - [x] README rewritten: architecture, new import contract, DSN table, type rules and
       their divergences, error model, concurrency, cancellation, COOP/COEP **and**
       CSP, browser floor, Vite and Next.js. ncruces attribution kept, mattn and
       modernc added.
 
-Exit: **met** — `npm test` (146 tests) and `go test ./...` are green, and the README
-describes what ships. Cross-browser coverage is the one thing still outstanding.
+Exit: **met** — `npm test` (265 tests across three engines) and `go test ./...` are
+green, and the README describes what ships.
 
 ---
 
@@ -214,6 +219,49 @@ describes what ships. Cross-browser coverage is the one thing still outstanding.
 ---
 
 ## Changelog
+
+### Closing out — the shipped Go-worker entry, and three engines
+
+`sqlite3-wasm-go/go-worker` now exports `runGoWasm(wasmUrl, opts)`, so the
+consumer's only JavaScript is one import and their own `.wasm` URL.
+`wasm_exec.js` is vendored, exposed as `sqlite3-wasm-go/wasm_exec.js`, and
+drift-checked against `$(go env GOROOT)/lib/wasm/wasm_exec.js` during `npm run
+build` — a Go toolchain bump now fails the build instead of shipping a runtime
+that mismatches the binaries it loads.
+
+Three bugs came out of building it, none of which the Chromium-only suite could
+have found on its own:
+
+- **Rollup tree-shook the Go runtime out of its own worker.** `package.json`'s
+  `sideEffects` list named only the `dist` files, so rollup — which reads that
+  same field while building *us* — treated `import '../index'` and
+  `import '../wasm_exec'` inside the runtime worker as dead code and removed both.
+  The worker shipped with no `Go` class and no global, silently. The source
+  entries are listed now, and `dist.node.test.ts` asserts both are present.
+- **A blob worker cannot resolve a root-relative URL.** Its base URL is the blob
+  URL, so `fetch('/assets/app.wasm')` fails with "Failed to parse URL" — and a
+  bundler's asset import hands you exactly that. `runGoWasm` absolutises against
+  `location.href` in the caller's realm before posting.
+- **The handshake swallowed the caller's deadline.** The first database access
+  also carries the worker handshake, and `Spawn` replaced a
+  `context.DeadlineExceeded` with a prose error, so `errors.Is(err,
+  context.DeadlineExceeded)` was false for a caller that had simply run out of
+  time. It now returns `ctx.Err()` when the caller's context ended and keeps the
+  descriptive error for its own timeout.
+
+The browser suite runs on **Chromium, Firefox and WebKit** — the whole suite, not
+a smoke tier. 265 tests green. Firefox matches Chromium everywhere, including the
+OPFS round trip across workers. Playwright's Linux WebKit build has no OPFS at all
+(no `navigator.storage.getDirectory`, no `FileSystemFileHandle`), so those two
+tiers skip there; everything else — driver, wire protocol, cancellation, the
+packaged bundle, running a Go program end to end — passes. That is a property of
+that build and is not evidence about Safari, which has had OPFS since 15.2.
+
+Also measured and then *not* done: making `createWorker` lazy in `src/index.ts`.
+It is imported inside the Go worker, which always needs the database worker, so
+laziness there would buy nothing and would turn a synchronous Go-facing contract
+into a promise. The `go-worker` entry, which a consumer's *page* imports, is lazy:
+1.4 kB with the 1.7 MB behind a dynamic import.
 
 ### Phases 4–7 — packaging, transport, driver, tests
 

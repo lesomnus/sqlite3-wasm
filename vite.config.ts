@@ -14,9 +14,12 @@ export default defineConfig({
   },
   build: {
     lib: {
-      entry: path.resolve(__dirname, 'src/index.ts'),
-			formats: ["es"],
-			fileName: (format, entryName) => `${entryName}.${format}.js`,
+      entry: {
+        index: path.resolve(__dirname, 'src/index.ts'),
+        'go-worker': path.resolve(__dirname, 'src/go-worker.ts'),
+      },
+      formats: ['es'],
+      fileName: (format, entryName) => `${entryName}.${format}.js`,
     },
     sourcemap: true,
     target: 'esnext',

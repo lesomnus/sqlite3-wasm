@@ -39,12 +39,24 @@ This library does **not** reimplement SQLite. It uses [`@sqlite.org/sqlite-wasm`
 npm i sqlite3-wasm-go
 ```
 
-Import the package **from inside the worker that runs your Go program**. It installs the global the Go driver looks for; importing it on the main thread installs it in the wrong realm.
+`runGoWasm` spawns a worker that hosts your Go program with the driver already available to it. The only thing you own is the URL of your own `.wasm`, because only your bundler can resolve that.
 
 ```ts
-// db-worker.ts — the worker that hosts your Go program
+import { runGoWasm } from 'sqlite3-wasm-go/go-worker'
+import appWasm from './app.wasm?url'          // Vite; use new URL(...) elsewhere
+
+const { worker, exited } = await runGoWasm(appWasm)
+console.log('exit code', await exited)
+```
+
+`wasm_exec.js` is vendored, and a build-time check fails loudly if the Go toolchain's copy drifts from it. The ~1.6 MB runtime sits behind a dynamic import, so it is fetched the first time you actually start a program rather than on page load.
+
+If you would rather host the Go program yourself, import the package **from inside that worker** — the global has to exist in the same realm as the Go program, and importing it on the main thread instead is the mistake that produces a confusing failure at `sql.Open`:
+
+```ts
+// your own worker
 import 'sqlite3-wasm-go'
-import './wasm_exec'
+import 'sqlite3-wasm-go/wasm_exec.js'         // the vendored, drift-checked copy
 
 const go = new Go()
 const { instance } = await WebAssembly.instantiateStreaming(fetch(wasmUrl), go.importObject)
@@ -167,6 +179,8 @@ It requires cross-origin isolation (for `SharedArrayBuffer`) and a CSP that perm
 
 The floor is roughly **Chrome 80 / Firefox 114 / Safari 16.4**: nested module workers, and OPFS sync access handles for persistence.
 
+The test suite runs on Chromium, Firefox and WebKit. All three run the driver, the wire protocol, cancellation and the packaged bundle; Chromium and Firefox additionally round-trip a real OPFS database across workers. Playwright's Linux WebKit build has no OPFS at all — no `navigator.storage.getDirectory`, no `FileSystemFileHandle` — so those tiers are skipped there. That is a property of that build and says nothing about Safari, which has supported OPFS since 15.2 and sync access handles since 17.
+
 ### Headers
 
 The `opfs` VFS needs cross-origin isolation:
@@ -207,10 +221,10 @@ Set the same two headers in `next.config.js` under `headers()`, and load the mod
 
 ```sh
 npm install
-npx playwright install chromium
+npx playwright install chromium firefox webkit   # and install-deps on Linux
 
 go test ./...   # wire codec, DSN, declared types, time, conversion
-npm test        # builds the examples and the bundle, then runs both tiers
+npm test        # builds the examples and the bundle, then runs every tier
 ```
 
 `go test ./...` runs on the host: the wire codec, the DSN parser, the declared-type classifier and the time layouts all carry no build tag, so the bulk of the driver's semantics is testable without a browser. Everything that touches sqlite3, workers, OPFS or Go/wasm runs under vitest browser mode.
