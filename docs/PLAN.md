@@ -126,8 +126,10 @@ Exit: **met** — 43 protocol-level tests pass in Chromium.
 - [x] The built bundle is tested directly: `src/dist.node.test.ts` asserts its shape
       and `src/dist.test.ts` runs it, including an **OPFS database that persists
       across two workers**.
-- [ ] A true downstream consumer app (installed into node_modules, built by its own
-      Vite/webpack) rather than importing `dist/` in place.
+- [x] `scripts/check-downstream.mts` — packs the package, installs the tarball into a
+      throwaway Vite app with a deliberately plain config, builds it with that app's own
+      Vite, serves it under COOP/COEP and runs a Go program in Chromium. Verified: the
+      consumer's build follows the lazy chunk and the program exits 0.
 
 Exit: **met** — a consumer imports `runGoWasm`, passes their own `.wasm` URL, and
 gets a working OPFS database. Verified against the built artifact.

@@ -7,3 +7,6 @@
 /src/examples
 # vitest browser-mode failure screenshots
 /src/__screenshots__
+
+# scratch consumer app built by scripts/check-downstream.mts
+/node_modules/.downstream

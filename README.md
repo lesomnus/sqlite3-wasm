@@ -223,8 +223,11 @@ Set the same two headers in `next.config.js` under `headers()`, and load the mod
 npm install
 npx playwright install chromium firefox webkit   # and install-deps on Linux
 
-go test ./...   # wire codec, DSN, declared types, time, conversion
-npm test        # builds the examples and the bundle, then runs every tier
+go test ./...          # wire codec, DSN, declared types, time, conversion
+npm test               # builds the examples and the bundle, then runs every tier
+npm run check:downstream   # packs the package, installs it into a scratch Vite
+                           # app, builds that with its own bundler, and runs a Go
+                           # program in it under COOP/COEP
 ```
 
 `go test ./...` runs on the host: the wire codec, the DSN parser, the declared-type classifier and the time layouts all carry no build tag, so the bulk of the driver's semantics is testable without a browser. Everything that touches sqlite3, workers, OPFS or Go/wasm runs under vitest browser mode.
