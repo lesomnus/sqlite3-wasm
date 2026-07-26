@@ -1,0 +1,15 @@
+{
+	"name": "lesomnus/sqlite-wasm",
+	"dockerComposeFile": "docker-compose.yaml",
+	"service": "dev",
+	"workspaceFolder": "/workspace",
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"golang.go",
+				"hashicorp.hcl",
+				"streetsidesoftware.code-spell-checker"
+			]
+		}
+	}
+}

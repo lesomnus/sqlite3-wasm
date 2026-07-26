@@ -1,0 +1,32 @@
+services:
+  dev:
+    image: ghcr.io/lesomnus/dev-golang:1.26
+    command: sleep infinity
+
+    user: "1000"
+    privileged: true
+    environment:
+      - SHELL=/bin/zsh
+
+    volumes:
+      - command.history:/commandhistory
+      - go.cache.mod:/home/hypnos/go/pkg/mod
+      - go.cache.bin:/home/hypnos/.cache/go-build
+
+      - ..:/workspace
+      - ${HOME}/workspaces:/workspaces
+
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8G
+          pids: 2048
+        reservations:
+          cpus: "2"
+          memory: 4G
+
+volumes:
+  command.history:
+  go.cache.mod:
+  go.cache.bin:
