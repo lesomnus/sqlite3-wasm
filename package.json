@@ -37,7 +37,8 @@
     "test:node": "vitest run --project node",
     "test:browser": "vitest run --project browser",
     "check:wasm-exec": "tsx scripts/check-wasm-exec.mts",
-    "check:downstream": "tsx scripts/check-downstream.mts"
+    "check:downstream": "tsx scripts/check-downstream.mts",
+    "prepack": "npm run build"
   },
   "devDependencies": {
     "@sqlite.org/sqlite-wasm": "3.50.4-build1",
