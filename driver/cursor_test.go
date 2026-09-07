@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +56,77 @@ func TestATimeSortsWithTheOnesAlreadyThere(t *testing.T) {
 			// what makes the byte comparison a comparison of instants.
 			if !strings.HasPrefix(elsewhere, got[:len("2024-01-02T15:04:05")]) {
 				t.Errorf("%q does not begin like %q", got, elsewhere)
+			}
+		})
+	}
+}
+
+// TestByteOrderIsTimeOrder, which is the property the whole format exists for.
+//
+// ISO 8601 is written the way it is so that sorting the text sorts the
+// instants, and SQLite leans on exactly that: a keyset cursor is `WHERE col >
+// ?` over a TEXT column, compared byte by byte with no notion of a date in it.
+// There are date functions -- `datetime()`, `julianday()` -- but wrapping the
+// column in one is a call per row and no index, which is the thing a cursor is
+// for.
+//
+// So the format has to hold up the invariant on its own, and two ways of
+// writing it did not. A space separator sorts after a 'T'. And a fraction with
+// its trailing zeros dropped sorts by its length: `.1` is a tenth and `.15` is
+// fifteen hundredths, but 'Z' is 0x5A where '5' is 0x35, so the tenth comes
+// second. Both were written by this driver, and both put a row on the wrong
+// side of a cursor.
+//
+// The instants below are chosen for that: fractions of every length, including
+// none, and pairs that differ only there.
+func TestByteOrderIsTimeOrder(t *testing.T) {
+	base := time.Date(2024, 1, 2, 15, 4, 5, 0, time.UTC)
+	ns := []int{
+		0,
+		1,
+		100,
+		1_000_000,   // .001
+		100_000_000, // .1  -- trimmed, this is the one that used to sort last
+		150_000_000, // .15
+		999_999_999, // .999999999
+		123_456_789,
+		120_000_000, // .12
+	}
+
+	for _, format := range []TimeFormat{TimeFormatOffset, TimeFormatUTC} {
+		t.Run(map[TimeFormat]string{TimeFormatOffset: "offset", TimeFormatUTC: "utc"}[format], func(t *testing.T) {
+			type at struct {
+				when time.Time
+				text string
+			}
+
+			vs := make([]at, len(ns))
+			for i, n := range ns {
+				w := base.Add(time.Duration(n))
+				vs[i] = at{when: w, text: formatTimeString(w, format, time.UTC)}
+			}
+
+			// Sorted the way SQLite would sort them, which is by the bytes.
+			byText := append([]at(nil), vs...)
+			sort.Slice(byText, func(i, j int) bool { return byText[i].text < byText[j].text })
+
+			byTime := append([]at(nil), vs...)
+			sort.Slice(byTime, func(i, j int) bool { return byTime[i].when.Before(byTime[j].when) })
+
+			for i := range byText {
+				if !byText[i].when.Equal(byTime[i].when) {
+					t.Fatalf("position %d: bytes say %q, the clock says %q -- a cursor over this column skips a row or repeats one",
+						i, byText[i].text, byTime[i].text)
+				}
+			}
+
+			// Every value the same width, which is what makes the above true
+			// for instants this test did not think of.
+			n := len(vs[0].text)
+			for _, v := range vs {
+				if len(v.text) != n {
+					t.Errorf("%q is %d bytes and %q is %d", v.text, len(v.text), vs[0].text, n)
+				}
 			}
 		})
 	}

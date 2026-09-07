@@ -14,8 +14,9 @@ import (
 //
 // Both separators are read and always were, so a database written by any
 // version of this driver — or by mattn, or by anything that writes RFC 3339 —
-// is read the same. Index 0 is the default write format, so a value this
-// driver writes round-trips through the first layout tried.
+// is read the same. `.999999999` accepts any number of fractional digits
+// including none, so what is written below round-trips through the first
+// layout tried even though it is written at a fixed width.
 var timeLayouts = []string{
 	"2006-01-02T15:04:05.999999999-07:00",
 	"2006-01-02 15:04:05.999999999-07:00",
@@ -44,15 +45,30 @@ var timeLayouts = []string{
 //
 // Sharing a file with mattn is the thing given up, and it is the lesser of the
 // two: mattn reads this form, and what it loses is byte-identical output.
+// # And the fraction is nine digits, always
+//
+// `.999999999` drops trailing zeros, which is what `time.RFC3339Nano` does and
+// what this wrote until it was measured. It breaks the same ordering the
+// separator does, and less visibly: `.1Z` and `.15Z` are a tenth and fifteen
+// hundredths, and byte order puts the tenth *after*, because 'Z' is 0x5A where
+// '5' is 0x35. Every pair whose fractional parts differ in length is a pair
+// SQLite orders by their lengths.
+//
+// A keyset cursor lands on one of those pairs at a page boundary and hands back
+// a row it already gave. Measured on a list of 201: four came twice.
+//
+// `.000000000` is nine digits whatever the instant, so every value is the same
+// width and byte order is time order again. Reading is unaffected -- the parse
+// layouts above take any width.
 const (
-	layoutOffset = "2006-01-02T15:04:05.999999999-07:00"
+	layoutOffset = "2006-01-02T15:04:05.000000000-07:00"
 	// The trailing Z is a literal, and it is load-bearing. Without it the
 	// value would be naive, and a naive value is read back in the *reader's*
 	// location — so writing UTC and reading with _loc=Asia/Seoul would shift
 	// by nine hours. With it the value is self-describing, still sorts
 	// lexicographically across zones, and SQLite's own date functions accept
 	// it (verified: datetime('2024-01-02T15:04:05.123Z') works).
-	layoutUTC      = "2006-01-02T15:04:05.999999999Z"
+	layoutUTC      = "2006-01-02T15:04:05.000000000Z"
 	layoutDatetime = "2006-01-02T15:04:05"
 )
 
