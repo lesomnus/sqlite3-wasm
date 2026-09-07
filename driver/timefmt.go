@@ -60,8 +60,24 @@ var timeLayouts = []string{
 // `.000000000` is nine digits whatever the instant, so every value is the same
 // width and byte order is time order again. Reading is unaffected -- the parse
 // layouts above take any width.
+// # And UTC is spelled Z
+//
+// `-07:00` always prints a number, so a UTC instant came out `+00:00` where
+// RFC 3339 -- and `time.RFC3339Nano`, and `ncruces/go-sqlite3` -- writes `Z`.
+// The two are the same instant and different bytes, and 'Z' is 0x5A where '+'
+// is 0x2B, so a row written by one and a cursor bound by the other compare by
+// their zone spelling.
+//
+// It is the same failure as the separator, one row narrower: the boundary row
+// of every page came back on the next one, because `col > ?` was true of the
+// row the cursor names. Measured on a list of 201 in a browser: four rows over,
+// one per page boundary.
+//
+// `Z07:00` is Go's token for what RFC 3339 actually says -- `Z` at zero and
+// `+09:00` elsewhere. Zones other than UTC still do not sort against each
+// other, which is what `TimeFormatUTC` is for and is written below.
 const (
-	layoutOffset = "2006-01-02T15:04:05.000000000-07:00"
+	layoutOffset = "2006-01-02T15:04:05.000000000Z07:00"
 	// The trailing Z is a literal, and it is load-bearing. Without it the
 	// value would be naive, and a naive value is read back in the *reader's*
 	// location — so writing UTC and reading with _loc=Asia/Seoul would shift

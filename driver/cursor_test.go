@@ -57,6 +57,15 @@ func TestATimeSortsWithTheOnesAlreadyThere(t *testing.T) {
 			if !strings.HasPrefix(elsewhere, got[:len("2024-01-02T15:04:05")]) {
 				t.Errorf("%q does not begin like %q", got, elsewhere)
 			}
+
+			// A UTC instant ends in `Z`, not `+00:00`. They are the same
+			// moment and different bytes, and 'Z' is 0x5A where '+' is 0x2B --
+			// so the row a cursor names compares greater than the cursor, and
+			// comes back on the page after its own. `datetime` carries no zone
+			// at all, which is its point and is not this.
+			if tc.format != TimeFormatDatetime && !strings.HasSuffix(got, "Z") {
+				t.Errorf("%q does not end in Z; a row written elsewhere reads %q", got, elsewhere)
+			}
 		})
 	}
 }

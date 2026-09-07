@@ -12,8 +12,9 @@ import (
 type TimeFormat uint8
 
 const (
-	// TimeFormatOffset writes "2006-01-02T15:04:05.000000000-07:00", which is
-	// the first parse layout and is understood by SQLite's datetime().
+	// TimeFormatOffset writes "2006-01-02T15:04:05.000000000Z07:00" -- so `Z`
+	// at UTC and `+09:00` elsewhere, which is RFC 3339 and what everything
+	// else writes. It is understood by SQLite's datetime().
 	TimeFormatOffset TimeFormat = iota
 	// TimeFormatUTC writes "2006-01-02T15:04:05.000000000Z" in UTC. Unlike the
 	// offset form it sorts and indexes correctly across zones.
