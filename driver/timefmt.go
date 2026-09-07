@@ -12,28 +12,48 @@ import (
 // "2006-01-02 15:04:05" and its 'T' form are shadowed by the fractional-second
 // layouts above them, because .999999999 is optional.
 //
-// Index 0 is also the default write format, so a value written by this driver
-// round-trips through the first layout tried.
+// Both separators are read and always were, so a database written by any
+// version of this driver — or by mattn, or by anything that writes RFC 3339 —
+// is read the same. Index 0 is the default write format, so a value this
+// driver writes round-trips through the first layout tried.
 var timeLayouts = []string{
-	"2006-01-02 15:04:05.999999999-07:00",
 	"2006-01-02T15:04:05.999999999-07:00",
-	"2006-01-02 15:04:05.999999999",
+	"2006-01-02 15:04:05.999999999-07:00",
 	"2006-01-02T15:04:05.999999999",
-	"2006-01-02 15:04",
+	"2006-01-02 15:04:05.999999999",
 	"2006-01-02T15:04",
+	"2006-01-02 15:04",
 	"2006-01-02",
 }
 
+// The separator is 'T', which is RFC 3339's and what the rest of the world
+// writes: `time.RFC3339Nano`, `ncruces/go-sqlite3`, every JSON timestamp.
+//
+// It used to be a space, byte-for-byte what mattn/go-sqlite3 writes, so that a
+// file shared with a Go server read the same either way. Reading was never the
+// problem — both separators are in the list above. **Comparing** was: SQLite
+// compares TEXT by bytes, and 'T' is 0x54 where a space is 0x20, so a row
+// written with one separator and a bound argument written with the other are
+// ordered by their separators rather than by their instants. A keyset cursor
+// over such a column stops advancing: every row is "after" the cursor, so the
+// same page comes back for ever.
+//
+// That is what happened. A sandbox seeded from a database `ncruces` had
+// written, then read here, paged the same fifty rows until the tab ran out of
+// memory — and nothing else was wrong, so nothing else said so.
+//
+// Sharing a file with mattn is the thing given up, and it is the lesser of the
+// two: mattn reads this form, and what it loses is byte-identical output.
 const (
-	layoutOffset = "2006-01-02 15:04:05.999999999-07:00"
+	layoutOffset = "2006-01-02T15:04:05.999999999-07:00"
 	// The trailing Z is a literal, and it is load-bearing. Without it the
 	// value would be naive, and a naive value is read back in the *reader's*
 	// location — so writing UTC and reading with _loc=Asia/Seoul would shift
 	// by nine hours. With it the value is self-describing, still sorts
 	// lexicographically across zones, and SQLite's own date functions accept
-	// it (verified: datetime('2024-01-02 15:04:05.123Z') works).
-	layoutUTC      = "2006-01-02 15:04:05.999999999Z"
-	layoutDatetime = "2006-01-02 15:04:05"
+	// it (verified: datetime('2024-01-02T15:04:05.123Z') works).
+	layoutUTC      = "2006-01-02T15:04:05.999999999Z"
+	layoutDatetime = "2006-01-02T15:04:05"
 )
 
 // parseTimeString parses a TEXT timestamp, reporting whether any layout matched.
@@ -97,9 +117,9 @@ func timeFromInteger(v int64, f IntegerTimeFormat, loc *time.Location) time.Time
 
 // formatTimeString renders a time.Time for a TEXT column.
 //
-// TimeFormatOffset is the default because it is byte-for-byte what
-// mattn/go-sqlite3 writes, so a database file shared between a Go server and a
-// browser reads the same either way. It has one limitation: the "-07:00" layout
+// TimeFormatOffset is the default because it is what a naive reader expects of
+// a timestamp column and what SQLite's own datetime() accepts. It has one
+// limitation: the "-07:00" layout
 // carries only whole minutes, so a zone whose offset has seconds — LMT before
 // standard time was adopted, e.g. Asia/Seoul before 1912 — does not round-trip
 // exactly. Use TimeFormatUTC when that matters; it also sorts correctly across

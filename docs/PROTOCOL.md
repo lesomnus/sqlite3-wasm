@@ -400,14 +400,20 @@ Returning the raw string on a failed parse is deliberate: a silent
 Time layouts, tried in order:
 
 ```
-2006-01-02 15:04:05.999999999-07:00      ← also the write format
-2006-01-02T15:04:05.999999999-07:00
-2006-01-02 15:04:05.999999999
+2006-01-02T15:04:05.999999999-07:00      ← also the write format
+2006-01-02 15:04:05.999999999-07:00
 2006-01-02T15:04:05.999999999
-2006-01-02 15:04
+2006-01-02 15:04:05.999999999
 2006-01-02T15:04
+2006-01-02 15:04
 2006-01-02
 ```
+
+Both separators are read, and always were. Only one is **written**, and it is
+`T`: SQLite compares TEXT by bytes, so a row written with one separator and a
+bound argument written with the other are ordered by the separator (0x54
+against 0x20) rather than by the instant. A keyset cursor over such a column
+then answers the whole table or none of it -- see `TestATimeSortsWithTheOnesAlreadyThere`.
 
 A trailing `Z` is stripped first (`strings.CutSuffix`) — Go's `-07:00` layout does
 not accept `Z`. Naive strings are parsed with `time.ParseInLocation(f, s, loc)`, so

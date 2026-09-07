@@ -285,7 +285,7 @@ func TestTimeRoundTrip(t *testing.T) {
 	t.Run("datetime truncates to the second", func(t *testing.T) {
 		want := time.Date(2024, 1, 2, 15, 4, 5, 0, time.UTC)
 		s := formatTimeString(want, TimeFormatDatetime, time.UTC)
-		if s != "2024-01-02 15:04:05" {
+		if s != "2024-01-02T15:04:05" {
 			t.Fatalf("got %q", s)
 		}
 		got, ok := parseTimeString(s, time.UTC)
